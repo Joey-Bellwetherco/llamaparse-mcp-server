@@ -112,10 +112,12 @@ def _process_single_chunk(file_content: bytes, mime_type: str) -> str:
     resource_name = client.processor_path(GCP_PROJECT_ID, GCP_LOCATION, GCP_PROCESSOR_ID)
     raw_document = documentai.RawDocument(content=file_content, mime_type=mime_type)
 
-    # Enable native PDF parsing and premium OCR for best financial doc results
+    # Force visual OCR on every page (no native text extraction)
+    # This renders each page as an image and OCR's it, catching graphics,
+    # unusual table layouts, charts, and visual elements that native parsing misses
     process_options = documentai.ProcessOptions(
         ocr_config=documentai.OcrConfig(
-            enable_native_pdf_parsing=True,
+            enable_native_pdf_parsing=False,
             language_code="en",
             premium_features=documentai.OcrConfig.PremiumFeatures(
                 enable_selection_mark_detection=True,
@@ -170,6 +172,38 @@ async def _process_document(file_content: bytes, mime_type: str = "application/p
 _uploaded_files: dict[str, tuple[bytes, str, str]] = {}  # id -> (bytes, mime_type, filename)
 
 mcp = FastMCP("Document AI MCP")
+
+
+@mcp.tool()
+async def parse_document_base64(
+    document_base64: str,
+    filename: str = "document.pdf",
+    mime_type: str = "application/pdf",
+) -> str:
+    """Parse a document using Google Document AI with visual OCR.
+
+    Send a base64-encoded document (PDF, image, etc.) and get back the parsed text
+    with structured tables. Uses OCR to visually read every page, capturing graphics,
+    charts, and unusual table formats.
+
+    Args:
+        document_base64: The document file content encoded as base64
+        filename: Name of the file (for reference)
+        mime_type: MIME type - application/pdf, image/png, image/jpeg, image/tiff, image/gif, image/bmp, image/webp
+    """
+    if not GOOGLE_DOCAI_CREDENTIALS_PATH:
+        return "Error: No Google Cloud credentials configured. Set GOOGLE_DOCAI_CREDENTIALS_PATH."
+
+    try:
+        file_bytes = base64.b64decode(document_base64)
+    except Exception:
+        return "Error: Invalid base64 encoding. Please send a valid base64-encoded document."
+
+    try:
+        result = await _process_document(file_bytes, mime_type)
+        return result
+    except Exception as e:
+        return f"Error: {str(e)}"
 
 
 @mcp.tool()
