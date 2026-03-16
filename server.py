@@ -11,13 +11,95 @@ from dotenv import load_dotenv
 from starlette.applications import Starlette
 from starlette.routing import Route, Mount
 from starlette.requests import Request
-from starlette.responses import JSONResponse, PlainTextResponse
+from starlette.responses import JSONResponse, PlainTextResponse, HTMLResponse
 from mcp.server.sse import SseServerTransport
 from google.cloud import documentai_v1 as documentai
 from google.oauth2 import service_account
 from pypdf import PdfReader, PdfWriter
 
 load_dotenv()
+
+UPLOAD_PAGE_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Document AI Parser</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: #0f172a; color: #e2e8f0; min-height: 100vh;
+         display: flex; align-items: center; justify-content: center; }
+  .container { max-width: 600px; width: 100%; padding: 2rem; }
+  h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
+  p.sub { color: #94a3b8; margin-bottom: 1.5rem; font-size: 0.9rem; }
+  .drop-zone { border: 2px dashed #475569; border-radius: 12px; padding: 3rem 2rem;
+                text-align: center; cursor: pointer; transition: all 0.2s; }
+  .drop-zone:hover, .drop-zone.drag-over { border-color: #3b82f6; background: #1e293b; }
+  .drop-zone input { display: none; }
+  .drop-zone p { color: #94a3b8; }
+  .drop-zone .icon { font-size: 2.5rem; margin-bottom: 0.5rem; }
+  #status { margin-top: 1.5rem; }
+  .parsing { color: #fbbf24; }
+  .success { background: #1e293b; border-radius: 8px; padding: 1rem; margin-top: 1rem; }
+  .doc-id { font-family: monospace; font-size: 1.2rem; color: #34d399;
+            background: #0f172a; padding: 0.3rem 0.6rem; border-radius: 4px;
+            user-select: all; cursor: pointer; }
+  .copy-btn { background: #3b82f6; color: white; border: none; padding: 0.4rem 1rem;
+              border-radius: 6px; cursor: pointer; margin-left: 0.5rem; font-size: 0.85rem; }
+  .copy-btn:hover { background: #2563eb; }
+  .instructions { color: #94a3b8; font-size: 0.85rem; margin-top: 0.75rem; line-height: 1.5; }
+  .error { color: #f87171; margin-top: 1rem; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Document AI Parser</h1>
+  <p class="sub">Upload a PDF or image to parse with Google Document AI OCR</p>
+  <div class="drop-zone" id="dropZone">
+    <div class="icon">📄</div>
+    <p>Drag & drop a file here, or click to browse</p>
+    <input type="file" id="fileInput" accept=".pdf,.png,.jpg,.jpeg,.tiff,.gif,.bmp,.webp">
+  </div>
+  <div id="status"></div>
+</div>
+<script>
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+const status = document.getElementById('status');
+
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault(); dropZone.classList.remove('drag-over');
+  if (e.dataTransfer.files.length) uploadFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', () => { if (fileInput.files.length) uploadFile(fileInput.files[0]); });
+
+async function uploadFile(file) {
+  status.innerHTML = '<p class="parsing">Parsing ' + file.name + '... (this may take a minute for large files)</p>';
+  const form = new FormData();
+  form.append('file', file);
+  try {
+    const resp = await fetch('/parse', { method: 'POST', body: form });
+    const data = await resp.json();
+    if (data.error) { status.innerHTML = '<p class="error">Error: ' + data.error + '</p>'; return; }
+    status.innerHTML = `
+      <div class="success">
+        <p>Parsed <strong>${data.filename}</strong> (${data.pages} pages, ${data.chars.toLocaleString()} chars)</p>
+        <p style="margin-top:0.75rem">Document ID: <span class="doc-id">${data.document_id}</span>
+          <button class="copy-btn" onclick="navigator.clipboard.writeText('${data.document_id}')">Copy</button></p>
+        <p class="instructions">
+          Paste this into Claude chat:<br>
+          <em>"Use the parsing service to get parsed result for document <strong>${data.document_id}</strong>"</em>
+        </p>
+      </div>`;
+  } catch (e) { status.innerHTML = '<p class="error">Upload failed: ' + e.message + '</p>'; }
+}
+</script>
+</body>
+</html>"""
 
 # Google Document AI config
 GCP_PROJECT_ID = os.environ.get("GOOGLE_DOCAI_PROJECT_ID", "decoded-flag-490415-n5")
@@ -336,6 +418,11 @@ async def handle_sse(request):
         )
 
 
+async def homepage(request):
+    """Simple drag-and-drop upload page."""
+    return HTMLResponse(UPLOAD_PAGE_HTML)
+
+
 async def health(request):
     return JSONResponse({"status": "ok"})
 
@@ -435,6 +522,7 @@ async def register(request):
 
 app = Starlette(
     routes=[
+        Route("/", homepage),
         Route("/health", health),
         Route("/parse", parse_endpoint, methods=["POST"]),
         Route("/result/{doc_id}", get_result_endpoint),
