@@ -1,5 +1,6 @@
 import os
 import io
+import re
 import json
 import uuid
 import time
@@ -105,7 +106,7 @@ async function uploadFile(file) {
 # Google Document AI config
 GCP_PROJECT_ID = os.environ.get("GOOGLE_DOCAI_PROJECT_ID", "decoded-flag-490415-n5")
 GCP_LOCATION = os.environ.get("GOOGLE_DOCAI_LOCATION", "us")
-GCP_PROCESSOR_ID = os.environ.get("GOOGLE_DOCAI_PROCESSOR_ID", "4cb1fa7e396faf09")
+GCP_PROCESSOR_ID = os.environ.get("GOOGLE_DOCAI_PROCESSOR_ID", "8a96e920607e3974")
 
 # Service account credentials — base64-encoded JSON string
 GOOGLE_DOCAI_CREDENTIALS_PATH = os.environ.get("GOOGLE_DOCAI_CREDENTIALS_PATH", "")
@@ -185,21 +186,30 @@ def _get_text_from_layout(layout, document_text: str) -> str:
     return text
 
 
-def _process_single_chunk(file_content: bytes, mime_type: str) -> str:
-    """Send a single document chunk to Document AI and return parsed text with tables."""
+def _get_page_text(page, document_text: str) -> str:
+    """Extract the text content for a single page using its layout text anchor."""
+    if page.layout and page.layout.text_anchor and page.layout.text_anchor.text_segments:
+        parts = []
+        for segment in page.layout.text_anchor.text_segments:
+            start = int(segment.start_index) if segment.start_index else 0
+            end = int(segment.end_index)
+            parts.append(document_text[start:end])
+        return "".join(parts)
+    return ""
+
+
+def _process_single_chunk(file_content: bytes, mime_type: str, page_offset: int = 0) -> str:
+    """Send a single document chunk to Document AI and return parsed text with page markers and tables."""
     client = _get_docai_client()
     resource_name = client.processor_path(GCP_PROJECT_ID, GCP_LOCATION, GCP_PROCESSOR_ID)
     raw_document = documentai.RawDocument(content=file_content, mime_type=mime_type)
 
-    # Enterprise Document OCR with premium features
+    # Layout Parser with Gemini — uses layout_config, not ocr_config
     process_options = documentai.ProcessOptions(
-        ocr_config=documentai.OcrConfig(
-            enable_native_pdf_parsing=False,
-            hints=documentai.OcrConfig.Hints(
-                language_hints=["en"],
-            ),
-            premium_features=documentai.OcrConfig.PremiumFeatures(
-                enable_selection_mark_detection=True,
+        layout_config=documentai.ProcessOptions.LayoutConfig(
+            chunking_config=documentai.ProcessOptions.LayoutConfig.ChunkingConfig(
+                chunk_size=1000,
+                include_ancestor_headings=True,
             ),
         ),
     )
@@ -212,14 +222,19 @@ def _process_single_chunk(file_content: bytes, mime_type: str) -> str:
     result = client.process_document(request=request)
     document = result.document
 
-    output_parts = [document.text]
+    output_parts = []
 
     for i, page in enumerate(document.pages):
+        page_num = page_offset + (page.page_number if page.page_number else i + 1)
+        page_text = _get_page_text(page, document.text).strip()
+
+        output_parts.append(f"[Page {page_num}]")
+        if page_text:
+            output_parts.append(page_text)
+
         tables = _extract_tables_from_page(page, document.text)
-        if tables:
-            page_num = page.page_number if page.page_number else i + 1
-            for j, table_md in enumerate(tables):
-                output_parts.append(f"\n[Table {j+1} on page {page_num}]\n{table_md}")
+        for j, table_md in enumerate(tables):
+            output_parts.append(f"[Table {j+1} on page {page_num}]\n{table_md}")
 
     return "\n\n".join(output_parts)
 
@@ -232,15 +247,19 @@ async def _process_document(file_content: bytes, mime_type: str = "application/p
         chunks = [file_content]
 
     if len(chunks) == 1:
-        return await asyncio.to_thread(_process_single_chunk, chunks[0], mime_type)
+        return await asyncio.to_thread(_process_single_chunk, chunks[0], mime_type, 0)
 
     semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
-    async def process_with_limit(chunk: bytes) -> str:
+    async def process_with_limit(chunk: bytes, offset: int) -> str:
         async with semaphore:
-            return await asyncio.to_thread(_process_single_chunk, chunk, mime_type)
+            return await asyncio.to_thread(_process_single_chunk, chunk, mime_type, offset)
 
-    results = await asyncio.gather(*[process_with_limit(c) for c in chunks])
+    tasks = [
+        process_with_limit(c, i * CHUNK_SIZE)
+        for i, c in enumerate(chunks)
+    ]
+    results = await asyncio.gather(*tasks)
     return "\n\n".join(results)
 
 
@@ -282,22 +301,28 @@ async def get_parsed_result(
     if page_start <= 1 and page_end <= 0:
         return f"[Document: {entry['filename']}, {total_pages} pages]\n\n{full_text}"
 
-    # Split by page markers and return requested range
-    # Document AI text doesn't have explicit page markers, so we split roughly
-    lines = full_text.split("\n")
-    total_lines = len(lines)
-    if total_pages > 0:
-        lines_per_page = max(1, total_lines // total_pages)
-    else:
-        lines_per_page = total_lines
+    # Split by [Page N] markers for accurate page-range extraction
+    page_sections = re.split(r'(?=\[Page \d+\])', full_text)
+    page_sections = [s for s in page_sections if s.strip()]
 
-    start_line = (page_start - 1) * lines_per_page
-    end_line = (page_end * lines_per_page) if page_end > 0 else total_lines
+    # Build a dict of page_num -> text
+    page_map = {}
+    for section in page_sections:
+        match = re.match(r'\[Page (\d+)\]', section)
+        if match:
+            pnum = int(match.group(1))
+            page_map[pnum] = section
 
-    selected = "\n".join(lines[start_line:end_line])
+    end = page_end if page_end > 0 else total_pages
+    selected_parts = []
+    for p in range(page_start, end + 1):
+        if p in page_map:
+            selected_parts.append(page_map[p])
+
+    selected = "\n\n".join(selected_parts) if selected_parts else "(No content for requested pages)"
     return (
         f"[Document: {entry['filename']}, showing pages {page_start}-"
-        f"{page_end if page_end > 0 else total_pages} of {total_pages}]\n\n{selected}"
+        f"{end} of {total_pages}]\n\n{selected}"
     )
 
 
