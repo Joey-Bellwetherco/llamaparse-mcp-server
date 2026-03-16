@@ -195,7 +195,9 @@ def _process_single_chunk(file_content: bytes, mime_type: str) -> str:
     process_options = documentai.ProcessOptions(
         ocr_config=documentai.OcrConfig(
             enable_native_pdf_parsing=False,
-            language_code="en",
+            hints=documentai.OcrConfig.Hints(
+                language_hints=["en"],
+            ),
             premium_features=documentai.OcrConfig.PremiumFeatures(
                 enable_selection_mark_detection=True,
             ),
