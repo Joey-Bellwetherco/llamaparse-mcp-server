@@ -2,6 +2,7 @@ import os
 import io
 import json
 import uuid
+import time
 import base64
 import asyncio
 import httpx
@@ -241,11 +242,10 @@ async def _process_document(file_content: bytes, mime_type: str = "application/p
     return "\n\n".join(results)
 
 
-# --- Parsed result cache ---
-# POST /parse uploads + parses in one step, stores result by ID.
-# MCP tool get_parsed_result retrieves by ID (tiny context footprint).
-# Also supports page-range retrieval so Claude can fetch in batches.
+# --- Parsed result cache + upload tokens ---
 _parsed_results: dict[str, dict] = {}  # id -> {"text": str, "pages": int, "filename": str}
+_upload_tokens: dict[str, dict] = {}   # token -> {"created": float, "filename": str}
+UPLOAD_TOKEN_TTL = 300  # 5 minutes
 
 mcp = FastMCP("Document AI MCP")
 
@@ -315,6 +315,44 @@ async def list_parsed_documents() -> str:
             f"{len(entry['text'])} chars (id: {doc_id})"
         )
     return "Parsed documents:\n" + "\n".join(lines)
+
+
+@mcp.tool()
+async def get_upload_url(
+    filename: str = "document.pdf",
+) -> str:
+    """Get a one-time upload URL to send a PDF to the parsing server.
+
+    Call this tool first, then use the returned curl command in the code execution
+    sandbox to upload the file. The file will be parsed automatically and you'll
+    get a document_id to retrieve results with get_parsed_result.
+
+    Args:
+        filename: Name of the file being uploaded
+    """
+    # Clean expired tokens
+    now = time.time()
+    expired = [t for t, v in _upload_tokens.items() if now - v["created"] > UPLOAD_TOKEN_TTL]
+    for t in expired:
+        del _upload_tokens[t]
+
+    token = str(uuid.uuid4())
+    _upload_tokens[token] = {"created": now, "filename": filename}
+
+    upload_url = f"{UPLOAD_URL}/upload/{token}"
+
+    return (
+        f"Upload URL ready (expires in 5 minutes).\n\n"
+        f"Run this command in the code execution sandbox to upload the file:\n\n"
+        f"```\n"
+        f'curl -X POST "{upload_url}" '
+        f'-F "file=@/path/to/{filename}" '
+        f"-H 'Content-Type: multipart/form-data'\n"
+        f"```\n\n"
+        f"Replace /path/to/{filename} with the actual file path in the sandbox.\n"
+        f"The server will parse the file and return a document_id.\n"
+        f"Then use get_parsed_result(document_id) to retrieve the parsed text."
+    )
 
 
 @mcp.tool()
@@ -400,8 +438,11 @@ async def check_status() -> str:
     if GOOGLE_DOCAI_CREDENTIALS_PATH:
         return (
             f"Document AI MCP is running and ready.\n\n"
-            f"To parse a PDF: Open {UPLOAD_URL} in your browser, "
-            f"drag-and-drop the file, then paste the document ID back here.\n\n"
+            f"To parse a PDF attached to this chat:\n"
+            f"1. Call get_upload_url(filename) to get a one-time upload URL\n"
+            f"2. Use code execution to curl the file to the upload URL\n"
+            f"3. Call get_parsed_result(document_id) to retrieve the parsed text\n\n"
+            f"Or upload manually at: {UPLOAD_URL}\n\n"
             f"Cached documents: {len(_parsed_results)}"
         )
     else:
@@ -491,6 +532,70 @@ async def parse_endpoint(request: Request):
     })
 
 
+async def token_upload_endpoint(request: Request):
+    """One-time token upload: accepts file, parses it, returns document_id."""
+    token = request.path_params.get("token", "")
+
+    if token not in _upload_tokens:
+        return JSONResponse({"error": "Invalid or expired upload token"}, status_code=403)
+
+    token_data = _upload_tokens.pop(token)
+
+    # Check TTL
+    if time.time() - token_data["created"] > UPLOAD_TOKEN_TTL:
+        return JSONResponse({"error": "Upload token expired. Request a new one."}, status_code=403)
+
+    if not GOOGLE_DOCAI_CREDENTIALS_PATH:
+        return JSONResponse({"error": "No credentials configured"}, status_code=500)
+
+    content_type = request.headers.get("content-type", "")
+
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        file = form.get("file")
+        if not file:
+            return JSONResponse({"error": "No file field in form"}, status_code=400)
+        file_bytes = await file.read()
+        filename = file.filename or token_data["filename"]
+        mime_type = file.content_type or "application/pdf"
+    else:
+        file_bytes = await request.body()
+        filename = request.headers.get("x-filename", token_data["filename"])
+        mime_type = content_type if content_type and content_type != "application/octet-stream" else "application/pdf"
+
+    if not file_bytes:
+        return JSONResponse({"error": "Empty file"}, status_code=400)
+
+    page_count = 0
+    if mime_type == "application/pdf":
+        try:
+            reader = PdfReader(io.BytesIO(file_bytes))
+            page_count = len(reader.pages)
+        except Exception:
+            page_count = 1
+    else:
+        page_count = 1
+
+    try:
+        result = await _process_document(file_bytes, mime_type)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+    doc_id = str(uuid.uuid4())[:8]
+    _parsed_results[doc_id] = {
+        "text": result,
+        "pages": page_count,
+        "filename": filename,
+    }
+
+    return JSONResponse({
+        "document_id": doc_id,
+        "filename": filename,
+        "pages": page_count,
+        "chars": len(result),
+    })
+
+
 async def get_result_endpoint(request: Request):
     """Direct HTTP endpoint to retrieve parsed text (non-MCP access)."""
     doc_id = request.path_params.get("doc_id", "")
@@ -531,6 +636,7 @@ app = Starlette(
         Route("/", homepage),
         Route("/health", health),
         Route("/parse", parse_endpoint, methods=["POST"]),
+        Route("/upload/{token}", token_upload_endpoint, methods=["POST"]),
         Route("/result/{doc_id}", get_result_endpoint),
         Route("/sse", endpoint=handle_sse),
         Mount("/messages/", app=sse.handle_post_message),
