@@ -306,7 +306,7 @@ async def list_parsed_documents() -> str:
     Returns document IDs, filenames, and page counts.
     """
     if not _parsed_results:
-        return "No parsed documents available. Upload a file via POST /parse first."
+        return f"No parsed documents available. Upload a file at {UPLOAD_URL} to get started."
 
     lines = []
     for doc_id, entry in _parsed_results.items():
@@ -388,14 +388,20 @@ async def parse_document_from_url(
         return f"Error: {str(e)}"
 
 
+UPLOAD_URL = os.environ.get("PUBLIC_URL", "https://bw-parse-mcp-server.up.railway.app")
+
+
 @mcp.tool()
 async def check_status() -> str:
-    """Check if the Document AI MCP server is configured and ready."""
+    """Check if the Document AI MCP server is configured and ready.
+
+    Also returns the upload URL where users can upload PDFs for parsing.
+    """
     if GOOGLE_DOCAI_CREDENTIALS_PATH:
         return (
-            f"Document AI MCP is running. Credentials configured. "
-            f"Project: {GCP_PROJECT_ID}, Location: {GCP_LOCATION}, Processor: {GCP_PROCESSOR_ID}. "
-            f"Ready to parse documents. "
+            f"Document AI MCP is running and ready.\n\n"
+            f"To parse a PDF: Open {UPLOAD_URL} in your browser, "
+            f"drag-and-drop the file, then paste the document ID back here.\n\n"
             f"Cached documents: {len(_parsed_results)}"
         )
     else:
