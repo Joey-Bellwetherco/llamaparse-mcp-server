@@ -191,23 +191,9 @@ def _process_single_chunk(file_content: bytes, mime_type: str) -> str:
     resource_name = client.processor_path(GCP_PROJECT_ID, GCP_LOCATION, GCP_PROCESSOR_ID)
     raw_document = documentai.RawDocument(content=file_content, mime_type=mime_type)
 
-    # Force visual OCR on every page — renders pages as images and OCR's them
-    process_options = documentai.ProcessOptions(
-        ocr_config=documentai.OcrConfig(
-            enable_native_pdf_parsing=False,
-            hints=documentai.OcrConfig.Hints(
-                language_hints=["en"],
-            ),
-            premium_features=documentai.OcrConfig.PremiumFeatures(
-                enable_selection_mark_detection=True,
-            ),
-        ),
-    )
-
     request = documentai.ProcessRequest(
         name=resource_name,
         raw_document=raw_document,
-        process_options=process_options,
     )
     result = client.process_document(request=request)
     document = result.document
