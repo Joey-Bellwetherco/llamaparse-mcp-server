@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from starlette.applications import Starlette
 from starlette.routing import Route, Mount
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, PlainTextResponse
 from mcp.server.sse import SseServerTransport
 from google.cloud import documentai_v1 as documentai
 from google.oauth2 import service_account
@@ -32,7 +32,6 @@ def _get_docai_client():
     """Create a Document AI client with proper credentials."""
     endpoint = f"{GCP_LOCATION}-documentai.googleapis.com"
     if GOOGLE_DOCAI_CREDENTIALS_PATH:
-        # Decode base64-encoded JSON credentials
         decoded = base64.b64decode(GOOGLE_DOCAI_CREDENTIALS_PATH)
         info = json.loads(decoded)
         creds = service_account.Credentials.from_service_account_info(info)
@@ -41,7 +40,6 @@ def _get_docai_client():
             client_options={"api_endpoint": endpoint},
         )
     else:
-        # Fall back to default credentials (e.g. on GCP)
         return documentai.DocumentProcessorServiceClient(
             client_options={"api_endpoint": endpoint},
         )
@@ -76,7 +74,6 @@ def _extract_tables_from_page(page, document_text: str) -> list[str]:
     tables = []
     for table in page.tables:
         rows = []
-        # Extract header rows
         for header_row in table.header_rows:
             cells = []
             for cell in header_row.cells:
@@ -84,7 +81,6 @@ def _extract_tables_from_page(page, document_text: str) -> list[str]:
                 cells.append(text)
             rows.append("| " + " | ".join(cells) + " |")
             rows.append("| " + " | ".join(["---"] * len(cells)) + " |")
-        # Extract body rows
         for body_row in table.body_rows:
             cells = []
             for cell in body_row.cells:
@@ -112,9 +108,7 @@ def _process_single_chunk(file_content: bytes, mime_type: str) -> str:
     resource_name = client.processor_path(GCP_PROJECT_ID, GCP_LOCATION, GCP_PROCESSOR_ID)
     raw_document = documentai.RawDocument(content=file_content, mime_type=mime_type)
 
-    # Force visual OCR on every page (no native text extraction)
-    # This renders each page as an image and OCR's it, catching graphics,
-    # unusual table layouts, charts, and visual elements that native parsing misses
+    # Force visual OCR on every page — renders pages as images and OCR's them
     process_options = documentai.ProcessOptions(
         ocr_config=documentai.OcrConfig(
             enable_native_pdf_parsing=False,
@@ -133,7 +127,6 @@ def _process_single_chunk(file_content: bytes, mime_type: str) -> str:
     result = client.process_document(request=request)
     document = result.document
 
-    # Build output: full text + any extracted tables in markdown format
     output_parts = [document.text]
 
     for i, page in enumerate(document.pages):
@@ -151,13 +144,11 @@ async def _process_document(file_content: bytes, mime_type: str = "application/p
     if mime_type == "application/pdf":
         chunks = _split_pdf(file_content)
     else:
-        # Images can't be split — send as-is
         chunks = [file_content]
 
     if len(chunks) == 1:
         return await asyncio.to_thread(_process_single_chunk, chunks[0], mime_type)
 
-    # Process all chunks in parallel with a concurrency limit
     semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
     async def process_with_limit(chunk: bytes) -> str:
@@ -168,69 +159,80 @@ async def _process_document(file_content: bytes, mime_type: str = "application/p
     return "\n\n".join(results)
 
 
-# In-memory store for uploaded files (keyed by upload ID)
-_uploaded_files: dict[str, tuple[bytes, str, str]] = {}  # id -> (bytes, mime_type, filename)
+# --- Parsed result cache ---
+# POST /parse uploads + parses in one step, stores result by ID.
+# MCP tool get_parsed_result retrieves by ID (tiny context footprint).
+# Also supports page-range retrieval so Claude can fetch in batches.
+_parsed_results: dict[str, dict] = {}  # id -> {"text": str, "pages": int, "filename": str}
 
 mcp = FastMCP("Document AI MCP")
 
 
 @mcp.tool()
-async def parse_document_base64(
-    document_base64: str,
-    filename: str = "document.pdf",
-    mime_type: str = "application/pdf",
+async def get_parsed_result(
+    document_id: str,
+    page_start: int = 1,
+    page_end: int = 0,
 ) -> str:
-    """Parse a document using Google Document AI with visual OCR.
+    """Retrieve parsed text from a document that was uploaded and parsed via POST /parse.
 
-    Send a base64-encoded document (PDF, image, etc.) and get back the parsed text
-    with structured tables. Uses OCR to visually read every page, capturing graphics,
-    charts, and unusual table formats.
+    The document_id is returned by the /parse endpoint. You can retrieve the full text
+    or a page range to avoid overloading the context window.
 
     Args:
-        document_base64: The document file content encoded as base64
-        filename: Name of the file (for reference)
-        mime_type: MIME type - application/pdf, image/png, image/jpeg, image/tiff, image/gif, image/bmp, image/webp
+        document_id: The ID returned from POST /parse
+        page_start: First page to return (1-indexed, default: 1)
+        page_end: Last page to return (0 = all remaining pages)
     """
-    if not GOOGLE_DOCAI_CREDENTIALS_PATH:
-        return "Error: No Google Cloud credentials configured. Set GOOGLE_DOCAI_CREDENTIALS_PATH."
+    if document_id not in _parsed_results:
+        return (
+            f"Error: No parsed document with id '{document_id}'. "
+            "Upload and parse a file first via POST /parse endpoint."
+        )
 
-    try:
-        file_bytes = base64.b64decode(document_base64)
-    except Exception:
-        return "Error: Invalid base64 encoding. Please send a valid base64-encoded document."
+    entry = _parsed_results[document_id]
+    full_text = entry["text"]
+    total_pages = entry["pages"]
 
-    try:
-        result = await _process_document(file_bytes, mime_type)
-        return result
-    except Exception as e:
-        return f"Error: {str(e)}"
+    # If no page range requested, return full text
+    if page_start <= 1 and page_end <= 0:
+        return f"[Document: {entry['filename']}, {total_pages} pages]\n\n{full_text}"
+
+    # Split by page markers and return requested range
+    # Document AI text doesn't have explicit page markers, so we split roughly
+    lines = full_text.split("\n")
+    total_lines = len(lines)
+    if total_pages > 0:
+        lines_per_page = max(1, total_lines // total_pages)
+    else:
+        lines_per_page = total_lines
+
+    start_line = (page_start - 1) * lines_per_page
+    end_line = (page_end * lines_per_page) if page_end > 0 else total_lines
+
+    selected = "\n".join(lines[start_line:end_line])
+    return (
+        f"[Document: {entry['filename']}, showing pages {page_start}-"
+        f"{page_end if page_end > 0 else total_pages} of {total_pages}]\n\n{selected}"
+    )
 
 
 @mcp.tool()
-async def parse_uploaded_document(
-    upload_id: str,
-) -> str:
-    """Parse a previously uploaded document using Google Document AI Layout Parser.
+async def list_parsed_documents() -> str:
+    """List all documents that have been parsed and are available for retrieval.
 
-    Use this after a file has been uploaded to the /upload endpoint.
-    The upload_id is returned by the upload endpoint.
-
-    Args:
-        upload_id: The ID returned from the /upload endpoint
+    Returns document IDs, filenames, and page counts.
     """
-    if not GOOGLE_DOCAI_CREDENTIALS_PATH:
-        return "Error: No Google Cloud credentials configured. Set GOOGLE_DOCAI_CREDENTIALS_PATH."
+    if not _parsed_results:
+        return "No parsed documents available. Upload a file via POST /parse first."
 
-    if upload_id not in _uploaded_files:
-        return f"Error: No file found with upload_id '{upload_id}'. Upload a file first via POST /upload."
-
-    file_bytes, mime_type, filename = _uploaded_files.pop(upload_id)
-
-    try:
-        result = await _process_document(file_bytes, mime_type)
-        return result
-    except Exception as e:
-        return f"Error: {str(e)}"
+    lines = []
+    for doc_id, entry in _parsed_results.items():
+        lines.append(
+            f"- {entry['filename']}: {entry['pages']} pages, "
+            f"{len(entry['text'])} chars (id: {doc_id})"
+        )
+    return "Parsed documents:\n" + "\n".join(lines)
 
 
 @mcp.tool()
@@ -238,9 +240,10 @@ async def parse_document_from_url(
     url: str,
     mime_type: str = "application/pdf",
 ) -> str:
-    """Parse a document from a URL using Google Document AI Layout Parser.
+    """Parse a document from a URL using Google Document AI with visual OCR.
 
     Provide a URL to a document (PDF or image) and get back the parsed text content.
+    For large documents, the result is cached — use get_parsed_result to retrieve pages.
 
     Args:
         url: Direct URL to a document file
@@ -250,7 +253,7 @@ async def parse_document_from_url(
         return "Error: No Google Cloud credentials configured. Set GOOGLE_DOCAI_CREDENTIALS_PATH."
 
     try:
-        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
             resp = await client.get(url)
             resp.raise_for_status()
             file_bytes = resp.content
@@ -266,30 +269,58 @@ async def parse_document_from_url(
     elif lower_url.endswith(".tiff"):
         mime_type = "image/tiff"
 
+    filename = url.split("/")[-1].split("?")[0] or "document.pdf"
+
     try:
         result = await _process_document(file_bytes, mime_type)
-        return result
+
+        # Count pages
+        page_count = 0
+        if mime_type == "application/pdf":
+            try:
+                reader = PdfReader(io.BytesIO(file_bytes))
+                page_count = len(reader.pages)
+            except Exception:
+                page_count = 1
+        else:
+            page_count = 1
+
+        # Cache the result
+        doc_id = str(uuid.uuid4())[:8]
+        _parsed_results[doc_id] = {
+            "text": result,
+            "pages": page_count,
+            "filename": filename,
+        }
+
+        # For small results return inline, for large ones return summary + ID
+        if len(result) < 50000:
+            return f"[Parsed {filename}, {page_count} pages, id: {doc_id}]\n\n{result}"
+        else:
+            return (
+                f"[Parsed {filename}, {page_count} pages, {len(result)} chars]\n"
+                f"Result is large. Use get_parsed_result(document_id='{doc_id}') to retrieve "
+                f"page ranges. Example: get_parsed_result('{doc_id}', page_start=1, page_end=10)"
+            )
     except Exception as e:
         return f"Error: {str(e)}"
 
 
 @mcp.tool()
 async def check_status() -> str:
-    """Check if the Document AI MCP server is configured and ready.
-
-    Returns the server status and whether credentials are configured.
-    """
+    """Check if the Document AI MCP server is configured and ready."""
     if GOOGLE_DOCAI_CREDENTIALS_PATH:
         return (
             f"Document AI MCP is running. Credentials configured. "
             f"Project: {GCP_PROJECT_ID}, Location: {GCP_LOCATION}, Processor: {GCP_PROCESSOR_ID}. "
-            f"Ready to parse documents."
+            f"Ready to parse documents. "
+            f"Cached documents: {len(_parsed_results)}"
         )
     else:
         return "Document AI MCP is running but no credentials are configured. Set GOOGLE_DOCAI_CREDENTIALS_PATH."
 
 
-# --- Starlette app with SSE transport + well-known endpoints for Claude.ai ---
+# --- Starlette app with SSE transport + HTTP endpoints ---
 
 sse = SseServerTransport("/messages/")
 
@@ -309,38 +340,11 @@ async def health(request):
     return JSONResponse({"status": "ok"})
 
 
-async def oauth_protected_resource(request):
-    """Tell clients no auth is required (MCP 2025-03-26 spec)."""
-    return JSONResponse({
-        "resource": f"https://{request.headers.get('host', 'localhost')}",
-        "bearer_methods_supported": [],
-        "resource_documentation": "https://github.com/Joey-Bellwetherco/llamaparse-mcp-server",
-    })
+async def parse_endpoint(request: Request):
+    """Upload + parse in one step. Returns a document_id for MCP tool retrieval."""
+    if not GOOGLE_DOCAI_CREDENTIALS_PATH:
+        return JSONResponse({"error": "No credentials configured"}, status_code=500)
 
-
-async def oauth_authorization_server(request):
-    """Return empty/minimal OAuth metadata since we don't require auth."""
-    return JSONResponse({
-        "issuer": f"https://{request.headers.get('host', 'localhost')}",
-        "authorization_endpoint": f"https://{request.headers.get('host', 'localhost')}/authorize",
-        "token_endpoint": f"https://{request.headers.get('host', 'localhost')}/token",
-        "response_types_supported": ["code"],
-    })
-
-
-async def register(request):
-    """Dynamic client registration endpoint — accept any registration."""
-    body = await request.json()
-    return JSONResponse({
-        "client_id": "docai-public-client",
-        "client_secret": "",
-        "client_name": body.get("client_name", "Claude"),
-        "redirect_uris": body.get("redirect_uris", []),
-    })
-
-
-async def upload_file(request: Request):
-    """Upload a file for parsing. Returns an upload_id to use with the MCP tool."""
     content_type = request.headers.get("content-type", "")
 
     if "multipart/form-data" in content_type:
@@ -352,30 +356,88 @@ async def upload_file(request: Request):
         filename = file.filename or "document.pdf"
         mime_type = file.content_type or "application/pdf"
     else:
-        # Raw binary upload
         file_bytes = await request.body()
         filename = request.headers.get("x-filename", "document.pdf")
-        mime_type = content_type or "application/pdf"
+        mime_type = content_type if content_type and content_type != "application/octet-stream" else "application/pdf"
 
     if not file_bytes:
         return JSONResponse({"error": "Empty file"}, status_code=400)
 
-    upload_id = str(uuid.uuid4())
-    _uploaded_files[upload_id] = (file_bytes, mime_type, filename)
+    # Count pages
+    page_count = 0
+    if mime_type == "application/pdf":
+        try:
+            reader = PdfReader(io.BytesIO(file_bytes))
+            page_count = len(reader.pages)
+        except Exception:
+            page_count = 1
+    else:
+        page_count = 1
+
+    try:
+        result = await _process_document(file_bytes, mime_type)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+    doc_id = str(uuid.uuid4())[:8]
+    _parsed_results[doc_id] = {
+        "text": result,
+        "pages": page_count,
+        "filename": filename,
+    }
 
     return JSONResponse({
-        "upload_id": upload_id,
+        "document_id": doc_id,
         "filename": filename,
-        "size_bytes": len(file_bytes),
-        "mime_type": mime_type,
-        "message": f"File uploaded. Use the parse_uploaded_document tool with upload_id '{upload_id}' to parse it.",
+        "pages": page_count,
+        "chars": len(result),
+        "message": (
+            f"Parsed successfully. In Claude, use: "
+            f"get_parsed_result(document_id='{doc_id}') to retrieve the text."
+        ),
+    })
+
+
+async def get_result_endpoint(request: Request):
+    """Direct HTTP endpoint to retrieve parsed text (non-MCP access)."""
+    doc_id = request.path_params.get("doc_id", "")
+    if doc_id not in _parsed_results:
+        return JSONResponse({"error": f"No document with id '{doc_id}'"}, status_code=404)
+    return PlainTextResponse(_parsed_results[doc_id]["text"])
+
+
+async def oauth_protected_resource(request):
+    return JSONResponse({
+        "resource": f"https://{request.headers.get('host', 'localhost')}",
+        "bearer_methods_supported": [],
+        "resource_documentation": "https://github.com/Joey-Bellwetherco/llamaparse-mcp-server",
+    })
+
+
+async def oauth_authorization_server(request):
+    return JSONResponse({
+        "issuer": f"https://{request.headers.get('host', 'localhost')}",
+        "authorization_endpoint": f"https://{request.headers.get('host', 'localhost')}/authorize",
+        "token_endpoint": f"https://{request.headers.get('host', 'localhost')}/token",
+        "response_types_supported": ["code"],
+    })
+
+
+async def register(request):
+    body = await request.json()
+    return JSONResponse({
+        "client_id": "docai-public-client",
+        "client_secret": "",
+        "client_name": body.get("client_name", "Claude"),
+        "redirect_uris": body.get("redirect_uris", []),
     })
 
 
 app = Starlette(
     routes=[
         Route("/health", health),
-        Route("/upload", upload_file, methods=["POST"]),
+        Route("/parse", parse_endpoint, methods=["POST"]),
+        Route("/result/{doc_id}", get_result_endpoint),
         Route("/sse", endpoint=handle_sse),
         Mount("/messages/", app=sse.handle_post_message),
         Route("/.well-known/oauth-protected-resource", oauth_protected_resource),
