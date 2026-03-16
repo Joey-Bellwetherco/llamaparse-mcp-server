@@ -321,11 +321,14 @@ async def list_parsed_documents() -> str:
 async def get_upload_url(
     filename: str = "document.pdf",
 ) -> str:
-    """Get a one-time upload URL to send a PDF to the parsing server.
+    """IMPORTANT: When a user asks to parse a PDF, ALWAYS use this tool first.
+    DO NOT base64-encode the file. DO NOT try to send file contents as text.
 
-    Call this tool first, then use the returned curl command in the code execution
-    sandbox to upload the file. The file will be parsed automatically and you'll
-    get a document_id to retrieve results with get_parsed_result.
+    This returns a one-time upload URL. After calling this tool:
+    1. Find the PDF file path in the sandbox (user attachments are at /uploads/ or similar)
+    2. Run the curl command in code execution to upload the file to the URL
+    3. Parse the JSON response to get the document_id
+    4. Call get_parsed_result(document_id) to retrieve the parsed text
 
     Args:
         filename: Name of the file being uploaded
@@ -343,15 +346,13 @@ async def get_upload_url(
 
     return (
         f"Upload URL ready (expires in 5 minutes).\n\n"
-        f"Run this command in the code execution sandbox to upload the file:\n\n"
-        f"```\n"
-        f'curl -X POST "{upload_url}" '
-        f'-F "file=@/path/to/{filename}" '
-        f"-H 'Content-Type: multipart/form-data'\n"
-        f"```\n\n"
-        f"Replace /path/to/{filename} with the actual file path in the sandbox.\n"
-        f"The server will parse the file and return a document_id.\n"
-        f"Then use get_parsed_result(document_id) to retrieve the parsed text."
+        f"NEXT STEPS — you MUST do these in code execution:\n\n"
+        f"Step 1: Find the file. Run: ls /uploads/ /tmp/ ~/ to locate the PDF.\n\n"
+        f"Step 2: Upload it with curl:\n"
+        f'curl -s -X POST "{upload_url}" -F "file=@FILE_PATH"\n\n'
+        f"Step 3: The response JSON contains a document_id. "
+        f"Call get_parsed_result(document_id) to retrieve the parsed text.\n\n"
+        f"DO NOT try to base64-encode or read the file contents into the conversation."
     )
 
 
@@ -438,11 +439,12 @@ async def check_status() -> str:
     if GOOGLE_DOCAI_CREDENTIALS_PATH:
         return (
             f"Document AI MCP is running and ready.\n\n"
-            f"To parse a PDF attached to this chat:\n"
+            f"IMPORTANT: To parse a PDF, NEVER base64-encode it. Instead:\n"
             f"1. Call get_upload_url(filename) to get a one-time upload URL\n"
-            f"2. Use code execution to curl the file to the upload URL\n"
-            f"3. Call get_parsed_result(document_id) to retrieve the parsed text\n\n"
-            f"Or upload manually at: {UPLOAD_URL}\n\n"
+            f"2. In code execution, run: curl -s -X POST \"<url>\" -F \"file=@/path/to/file.pdf\"\n"
+            f"3. Call get_parsed_result(document_id) with the ID from the curl response\n\n"
+            f"For URLs: call parse_document_from_url(url) directly.\n"
+            f"Manual upload: {UPLOAD_URL}\n\n"
             f"Cached documents: {len(_parsed_results)}"
         )
     else:
