@@ -69,14 +69,77 @@ def _split_pdf(pdf_bytes: bytes) -> list[bytes]:
     return chunks
 
 
+def _extract_tables_from_page(page, document_text: str) -> list[str]:
+    """Extract tables from a page as markdown-formatted tables."""
+    tables = []
+    for table in page.tables:
+        rows = []
+        # Extract header rows
+        for header_row in table.header_rows:
+            cells = []
+            for cell in header_row.cells:
+                text = _get_text_from_layout(cell.layout, document_text).strip()
+                cells.append(text)
+            rows.append("| " + " | ".join(cells) + " |")
+            rows.append("| " + " | ".join(["---"] * len(cells)) + " |")
+        # Extract body rows
+        for body_row in table.body_rows:
+            cells = []
+            for cell in body_row.cells:
+                text = _get_text_from_layout(cell.layout, document_text).strip()
+                cells.append(text)
+            rows.append("| " + " | ".join(cells) + " |")
+        if rows:
+            tables.append("\n".join(rows))
+    return tables
+
+
+def _get_text_from_layout(layout, document_text: str) -> str:
+    """Extract text from a layout element using text anchors."""
+    text = ""
+    for segment in layout.text_anchor.text_segments:
+        start = int(segment.start_index) if segment.start_index else 0
+        end = int(segment.end_index)
+        text += document_text[start:end]
+    return text
+
+
 def _process_single_chunk(file_content: bytes, mime_type: str) -> str:
-    """Send a single document chunk to Document AI and return parsed text."""
+    """Send a single document chunk to Document AI and return parsed text with tables."""
     client = _get_docai_client()
     resource_name = client.processor_path(GCP_PROJECT_ID, GCP_LOCATION, GCP_PROCESSOR_ID)
     raw_document = documentai.RawDocument(content=file_content, mime_type=mime_type)
-    request = documentai.ProcessRequest(name=resource_name, raw_document=raw_document)
+
+    # Enable native PDF parsing and premium OCR for best financial doc results
+    process_options = documentai.ProcessOptions(
+        ocr_config=documentai.OcrConfig(
+            enable_native_pdf_parsing=True,
+            language_code="en",
+            premium_features=documentai.OcrConfig.PremiumFeatures(
+                enable_selection_mark_detection=True,
+            ),
+        ),
+    )
+
+    request = documentai.ProcessRequest(
+        name=resource_name,
+        raw_document=raw_document,
+        process_options=process_options,
+    )
     result = client.process_document(request=request)
-    return result.document.text
+    document = result.document
+
+    # Build output: full text + any extracted tables in markdown format
+    output_parts = [document.text]
+
+    for i, page in enumerate(document.pages):
+        tables = _extract_tables_from_page(page, document.text)
+        if tables:
+            page_num = page.page_number if page.page_number else i + 1
+            for j, table_md in enumerate(tables):
+                output_parts.append(f"\n[Table {j+1} on page {page_num}]\n{table_md}")
+
+    return "\n\n".join(output_parts)
 
 
 async def _process_document(file_content: bytes, mime_type: str = "application/pdf") -> str:
