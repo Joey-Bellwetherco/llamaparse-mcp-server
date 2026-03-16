@@ -6,3 +6,4 @@ starlette>=0.36.0
 google-cloud-documentai>=2.20.0
 google-auth>=2.20.0
 pypdf>=4.0.0
+python-multipart>=0.0.6

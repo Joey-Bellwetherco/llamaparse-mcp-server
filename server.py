@@ -1,6 +1,7 @@
 import os
 import io
 import json
+import uuid
 import base64
 import asyncio
 import httpx
@@ -9,6 +10,7 @@ from mcp.server.fastmcp import FastMCP
 from dotenv import load_dotenv
 from starlette.applications import Starlette
 from starlette.routing import Route, Mount
+from starlette.requests import Request
 from starlette.responses import JSONResponse
 from mcp.server.sse import SseServerTransport
 from google.cloud import documentai_v1 as documentai
@@ -164,31 +166,31 @@ async def _process_document(file_content: bytes, mime_type: str = "application/p
     return "\n\n".join(results)
 
 
+# In-memory store for uploaded files (keyed by upload ID)
+_uploaded_files: dict[str, tuple[bytes, str, str]] = {}  # id -> (bytes, mime_type, filename)
+
 mcp = FastMCP("Document AI MCP")
 
 
 @mcp.tool()
-async def parse_document_base64(
-    document_base64: str,
-    filename: str = "document.pdf",
-    mime_type: str = "application/pdf",
+async def parse_uploaded_document(
+    upload_id: str,
 ) -> str:
-    """Parse a document using Google Document AI Layout Parser.
+    """Parse a previously uploaded document using Google Document AI Layout Parser.
 
-    Send a base64-encoded document (PDF, image, etc.) and get back the parsed text content.
+    Use this after a file has been uploaded to the /upload endpoint.
+    The upload_id is returned by the upload endpoint.
 
     Args:
-        document_base64: The document file content encoded as base64
-        filename: Name of the file (for reference)
-        mime_type: MIME type - application/pdf, image/png, image/jpeg, image/tiff, image/gif, image/bmp, image/webp
+        upload_id: The ID returned from the /upload endpoint
     """
     if not GOOGLE_DOCAI_CREDENTIALS_PATH:
         return "Error: No Google Cloud credentials configured. Set GOOGLE_DOCAI_CREDENTIALS_PATH."
 
-    try:
-        file_bytes = base64.b64decode(document_base64)
-    except Exception:
-        return "Error: Invalid base64 encoding. Please send a valid base64-encoded document."
+    if upload_id not in _uploaded_files:
+        return f"Error: No file found with upload_id '{upload_id}'. Upload a file first via POST /upload."
+
+    file_bytes, mime_type, filename = _uploaded_files.pop(upload_id)
 
     try:
         result = await _process_document(file_bytes, mime_type)
@@ -303,9 +305,43 @@ async def register(request):
     })
 
 
+async def upload_file(request: Request):
+    """Upload a file for parsing. Returns an upload_id to use with the MCP tool."""
+    content_type = request.headers.get("content-type", "")
+
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        file = form.get("file")
+        if not file:
+            return JSONResponse({"error": "No file field in form"}, status_code=400)
+        file_bytes = await file.read()
+        filename = file.filename or "document.pdf"
+        mime_type = file.content_type or "application/pdf"
+    else:
+        # Raw binary upload
+        file_bytes = await request.body()
+        filename = request.headers.get("x-filename", "document.pdf")
+        mime_type = content_type or "application/pdf"
+
+    if not file_bytes:
+        return JSONResponse({"error": "Empty file"}, status_code=400)
+
+    upload_id = str(uuid.uuid4())
+    _uploaded_files[upload_id] = (file_bytes, mime_type, filename)
+
+    return JSONResponse({
+        "upload_id": upload_id,
+        "filename": filename,
+        "size_bytes": len(file_bytes),
+        "mime_type": mime_type,
+        "message": f"File uploaded. Use the parse_uploaded_document tool with upload_id '{upload_id}' to parse it.",
+    })
+
+
 app = Starlette(
     routes=[
         Route("/health", health),
+        Route("/upload", upload_file, methods=["POST"]),
         Route("/sse", endpoint=handle_sse),
         Mount("/messages/", app=sse.handle_post_message),
         Route("/.well-known/oauth-protected-resource", oauth_protected_resource),
