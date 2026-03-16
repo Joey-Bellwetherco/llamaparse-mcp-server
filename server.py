@@ -1,8 +1,8 @@
 import os
-import io
 import asyncio
 import base64
 import httpx
+import uvicorn
 from mcp.server.fastmcp import FastMCP
 from dotenv import load_dotenv
 
@@ -25,7 +25,6 @@ async def _upload_and_parse(
         "Authorization": f"Bearer {LLAMA_CLOUD_API_KEY}",
     }
 
-    # Upload the file
     async with httpx.AsyncClient(timeout=120) as client:
         upload_resp = await client.post(
             f"{LLAMA_PARSE_API_URL}/upload",
@@ -40,8 +39,7 @@ async def _upload_and_parse(
         job = upload_resp.json()
         job_id = job["id"]
 
-        # Poll for completion
-        max_attempts = 120  # up to ~4 minutes
+        max_attempts = 120
         for _ in range(max_attempts):
             status_resp = await client.get(
                 f"{LLAMA_PARSE_API_URL}/job/{job_id}",
@@ -51,7 +49,6 @@ async def _upload_and_parse(
             status_data = status_resp.json()
 
             if status_data["status"] == "SUCCESS":
-                # Get the result
                 result_resp = await client.get(
                     f"{LLAMA_PARSE_API_URL}/job/{job_id}/result/{result_type}",
                     headers=headers,
@@ -59,7 +56,6 @@ async def _upload_and_parse(
                 result_resp.raise_for_status()
                 result_data = result_resp.json()
 
-                # Combine all pages
                 pages = result_data.get(result_type, result_data.get("pages", []))
                 if isinstance(pages, list):
                     return "\n\n---\n\n".join(
@@ -72,7 +68,6 @@ async def _upload_and_parse(
                     f"LlamaParse job failed: {status_data.get('error', 'Unknown error')}"
                 )
 
-            # Wait 2 seconds before polling again
             await asyncio.sleep(2)
 
         raise Exception("LlamaParse job timed out after 4 minutes")
@@ -161,5 +156,34 @@ async def check_status() -> str:
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    # Run as streamable HTTP transport for remote access
-    mcp.run(transport="streamable-http", host="0.0.0.0", port=port)
+
+    # Use SSE transport served via starlette/uvicorn
+    from starlette.applications import Starlette
+    from starlette.routing import Mount, Route
+    from starlette.responses import JSONResponse
+    from mcp.server.sse import SseServerTransport
+
+    sse = SseServerTransport("/messages/")
+
+    async def handle_sse(request):
+        async with sse.connect_sse(
+            request.scope, request.receive, request._send
+        ) as (read_stream, write_stream):
+            await mcp._mcp_server.run(
+                read_stream,
+                write_stream,
+                mcp._mcp_server.create_initialization_options(),
+            )
+
+    async def health(request):
+        return JSONResponse({"status": "ok"})
+
+    app = Starlette(
+        routes=[
+            Route("/health", health),
+            Route("/sse", endpoint=handle_sse),
+            Mount("/messages/", app=sse.handle_post_message),
+        ],
+    )
+
+    uvicorn.run(app, host="0.0.0.0", port=port)
