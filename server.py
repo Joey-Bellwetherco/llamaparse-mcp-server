@@ -105,7 +105,7 @@ async function uploadFile(file) {
 # Google Document AI config
 GCP_PROJECT_ID = os.environ.get("GOOGLE_DOCAI_PROJECT_ID", "decoded-flag-490415-n5")
 GCP_LOCATION = os.environ.get("GOOGLE_DOCAI_LOCATION", "us")
-GCP_PROCESSOR_ID = os.environ.get("GOOGLE_DOCAI_PROCESSOR_ID", "8a96e920607e3974")
+GCP_PROCESSOR_ID = os.environ.get("GOOGLE_DOCAI_PROCESSOR_ID", "4cb1fa7e396faf09")
 
 # Service account credentials — base64-encoded JSON string
 GOOGLE_DOCAI_CREDENTIALS_PATH = os.environ.get("GOOGLE_DOCAI_CREDENTIALS_PATH", "")
@@ -191,9 +191,23 @@ def _process_single_chunk(file_content: bytes, mime_type: str) -> str:
     resource_name = client.processor_path(GCP_PROJECT_ID, GCP_LOCATION, GCP_PROCESSOR_ID)
     raw_document = documentai.RawDocument(content=file_content, mime_type=mime_type)
 
+    # Enterprise Document OCR with premium features
+    process_options = documentai.ProcessOptions(
+        ocr_config=documentai.OcrConfig(
+            enable_native_pdf_parsing=False,
+            hints=documentai.OcrConfig.Hints(
+                language_hints=["en"],
+            ),
+            premium_features=documentai.OcrConfig.PremiumFeatures(
+                enable_selection_mark_detection=True,
+            ),
+        ),
+    )
+
     request = documentai.ProcessRequest(
         name=resource_name,
         raw_document=raw_document,
+        process_options=process_options,
     )
     result = client.process_document(request=request)
     document = result.document
