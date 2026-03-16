@@ -1,7 +1,7 @@
 import os
 import io
+import asyncio
 import base64
-import time
 import httpx
 from mcp.server.fastmcp import FastMCP
 from dotenv import load_dotenv
@@ -11,10 +11,7 @@ load_dotenv()
 LLAMA_CLOUD_API_KEY = os.environ.get("LLAMA_CLOUD_API_KEY", "")
 LLAMA_PARSE_API_URL = "https://api.cloud.llamaindex.ai/api/parsing"
 
-mcp = FastMCP(
-    "LlamaParse MCP",
-    description="Parse PDFs and documents using LlamaParse. Send a PDF and get back structured markdown.",
-)
+mcp = FastMCP("LlamaParse MCP")
 
 
 async def _upload_and_parse(
@@ -76,7 +73,7 @@ async def _upload_and_parse(
                 )
 
             # Wait 2 seconds before polling again
-            time.sleep(2)
+            await asyncio.sleep(2)
 
         raise Exception("LlamaParse job timed out after 4 minutes")
 
