@@ -1,7 +1,7 @@
 import os
-import asyncio
-import base64
 import json
+import base64
+import asyncio
 import httpx
 import uvicorn
 from mcp.server.fastmcp import FastMCP
@@ -10,121 +10,97 @@ from starlette.applications import Starlette
 from starlette.routing import Route, Mount
 from starlette.responses import JSONResponse
 from mcp.server.sse import SseServerTransport
+from google.cloud import documentai_v1 as documentai
+from google.oauth2 import service_account
 
 load_dotenv()
 
-LLAMA_CLOUD_API_KEY = os.environ.get("LLAMA_CLOUD_API_KEY", "")
-LLAMA_PARSE_API_URL = "https://api.cloud.llamaindex.ai/api/parsing"
+# Google Document AI config
+GCP_PROJECT_ID = os.environ.get("GOOGLE_DOCAI_PROJECT_ID", "decoded-flag-490415-n5")
+GCP_LOCATION = os.environ.get("GOOGLE_DOCAI_LOCATION", "us")
+GCP_PROCESSOR_ID = os.environ.get("GOOGLE_DOCAI_PROCESSOR_ID", "8a96e920607e3974")
 
-mcp = FastMCP("LlamaParse MCP")
+# Service account credentials — base64-encoded JSON string
+GOOGLE_DOCAI_CREDENTIALS_PATH = os.environ.get("GOOGLE_DOCAI_CREDENTIALS_PATH", "")
 
 
-async def _upload_and_parse(
-    file_content: bytes,
-    filename: str,
-    result_type: str = "markdown",
-    language: str = "en",
-) -> str:
-    """Upload a file to LlamaParse and wait for the parsed result."""
-    headers = {
-        "Authorization": f"Bearer {LLAMA_CLOUD_API_KEY}",
-    }
-
-    async with httpx.AsyncClient(timeout=120) as client:
-        upload_resp = await client.post(
-            f"{LLAMA_PARSE_API_URL}/upload",
-            headers=headers,
-            files={"file": (filename, file_content, "application/pdf")},
-            data={
-                "result_type": result_type,
-                "language": language,
-            },
+def _get_docai_client():
+    """Create a Document AI client with proper credentials."""
+    endpoint = f"{GCP_LOCATION}-documentai.googleapis.com"
+    if GOOGLE_DOCAI_CREDENTIALS_PATH:
+        # Decode base64-encoded JSON credentials
+        decoded = base64.b64decode(GOOGLE_DOCAI_CREDENTIALS_PATH)
+        info = json.loads(decoded)
+        creds = service_account.Credentials.from_service_account_info(info)
+        return documentai.DocumentProcessorServiceClient(
+            credentials=creds,
+            client_options={"api_endpoint": endpoint},
         )
-        upload_resp.raise_for_status()
-        job = upload_resp.json()
-        job_id = job["id"]
+    else:
+        # Fall back to default credentials (e.g. on GCP)
+        return documentai.DocumentProcessorServiceClient(
+            client_options={"api_endpoint": endpoint},
+        )
 
-        max_attempts = 120
-        for _ in range(max_attempts):
-            status_resp = await client.get(
-                f"{LLAMA_PARSE_API_URL}/job/{job_id}",
-                headers=headers,
-            )
-            status_resp.raise_for_status()
-            status_data = status_resp.json()
 
-            if status_data["status"] == "SUCCESS":
-                result_resp = await client.get(
-                    f"{LLAMA_PARSE_API_URL}/job/{job_id}/result/{result_type}",
-                    headers=headers,
-                )
-                result_resp.raise_for_status()
-                result_data = result_resp.json()
+def _process_document(file_content: bytes, mime_type: str = "application/pdf") -> str:
+    """Send a document to Document AI and return the parsed text."""
+    client = _get_docai_client()
+    resource_name = client.processor_path(GCP_PROJECT_ID, GCP_LOCATION, GCP_PROCESSOR_ID)
+    raw_document = documentai.RawDocument(content=file_content, mime_type=mime_type)
+    request = documentai.ProcessRequest(name=resource_name, raw_document=raw_document)
+    result = client.process_document(request=request)
+    return result.document.text
 
-                pages = result_data.get(result_type, result_data.get("pages", []))
-                if isinstance(pages, list):
-                    return "\n\n---\n\n".join(
-                        p.get(result_type, p.get("text", str(p))) for p in pages
-                    )
-                return str(pages)
 
-            elif status_data["status"] == "ERROR":
-                raise Exception(
-                    f"LlamaParse job failed: {status_data.get('error', 'Unknown error')}"
-                )
-
-            await asyncio.sleep(2)
-
-        raise Exception("LlamaParse job timed out after 4 minutes")
+mcp = FastMCP("Document AI MCP")
 
 
 @mcp.tool()
-async def parse_pdf_base64(
-    pdf_base64: str,
+async def parse_document_base64(
+    document_base64: str,
     filename: str = "document.pdf",
-    output_format: str = "markdown",
+    mime_type: str = "application/pdf",
 ) -> str:
-    """Parse a PDF document using LlamaParse.
+    """Parse a document using Google Document AI Layout Parser.
 
-    Send a base64-encoded PDF and get back the parsed content as markdown or text.
+    Send a base64-encoded document (PDF, image, etc.) and get back the parsed text content.
 
     Args:
-        pdf_base64: The PDF file content encoded as base64
-        filename: Name of the file (for LlamaParse metadata)
-        output_format: Output format - "markdown" or "text"
+        document_base64: The document file content encoded as base64
+        filename: Name of the file (for reference)
+        mime_type: MIME type - application/pdf, image/png, image/jpeg, image/tiff, image/gif, image/bmp, image/webp
     """
-    if not LLAMA_CLOUD_API_KEY:
-        return "Error: LLAMA_CLOUD_API_KEY is not set. Please configure it in the environment."
+    if not GOOGLE_DOCAI_CREDENTIALS_PATH:
+        return "Error: No Google Cloud credentials configured. Set GOOGLE_DOCAI_CREDENTIALS_PATH."
 
     try:
-        file_bytes = base64.b64decode(pdf_base64)
+        file_bytes = base64.b64decode(document_base64)
     except Exception:
-        return "Error: Invalid base64 encoding. Please send a valid base64-encoded PDF."
+        return "Error: Invalid base64 encoding. Please send a valid base64-encoded document."
 
     try:
-        result = await _upload_and_parse(file_bytes, filename, output_format)
+        result = await asyncio.to_thread(_process_document, file_bytes, mime_type)
         return result
-    except httpx.HTTPStatusError as e:
-        return f"Error from LlamaParse API: {e.response.status_code} - {e.response.text}"
     except Exception as e:
         return f"Error: {str(e)}"
 
 
 @mcp.tool()
-async def parse_pdf_from_url(
+async def parse_document_from_url(
     url: str,
-    output_format: str = "markdown",
+    mime_type: str = "application/pdf",
 ) -> str:
-    """Parse a PDF from a URL using LlamaParse.
+    """Parse a document from a URL using Google Document AI Layout Parser.
 
-    Provide a URL to a PDF and get back the parsed content as markdown or text.
+    Provide a URL to a document (PDF or image) and get back the parsed text content.
 
     Args:
-        url: Direct URL to a PDF file
-        output_format: Output format - "markdown" or "text"
+        url: Direct URL to a document file
+        mime_type: MIME type of the document (default: application/pdf)
     """
-    if not LLAMA_CLOUD_API_KEY:
-        return "Error: LLAMA_CLOUD_API_KEY is not set. Please configure it in the environment."
+    if not GOOGLE_DOCAI_CREDENTIALS_PATH:
+        return "Error: No Google Cloud credentials configured. Set GOOGLE_DOCAI_CREDENTIALS_PATH."
 
     try:
         async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
@@ -132,31 +108,38 @@ async def parse_pdf_from_url(
             resp.raise_for_status()
             file_bytes = resp.content
     except Exception as e:
-        return f"Error downloading PDF from URL: {str(e)}"
+        return f"Error downloading document from URL: {str(e)}"
 
-    filename = url.split("/")[-1].split("?")[0] or "document.pdf"
-    if not filename.endswith(".pdf"):
-        filename += ".pdf"
+    # Auto-detect mime type from URL extension
+    lower_url = url.lower().split("?")[0]
+    if lower_url.endswith(".png"):
+        mime_type = "image/png"
+    elif lower_url.endswith((".jpg", ".jpeg")):
+        mime_type = "image/jpeg"
+    elif lower_url.endswith(".tiff"):
+        mime_type = "image/tiff"
 
     try:
-        result = await _upload_and_parse(file_bytes, filename, output_format)
+        result = await asyncio.to_thread(_process_document, file_bytes, mime_type)
         return result
-    except httpx.HTTPStatusError as e:
-        return f"Error from LlamaParse API: {e.response.status_code} - {e.response.text}"
     except Exception as e:
         return f"Error: {str(e)}"
 
 
 @mcp.tool()
 async def check_status() -> str:
-    """Check if the LlamaParse MCP server is configured and ready.
+    """Check if the Document AI MCP server is configured and ready.
 
-    Returns the server status and whether the API key is set.
+    Returns the server status and whether credentials are configured.
     """
-    if LLAMA_CLOUD_API_KEY:
-        return "LlamaParse MCP is running and API key is configured. Ready to parse documents."
+    if GOOGLE_DOCAI_CREDENTIALS_PATH:
+        return (
+            f"Document AI MCP is running. Credentials configured. "
+            f"Project: {GCP_PROJECT_ID}, Location: {GCP_LOCATION}, Processor: {GCP_PROCESSOR_ID}. "
+            f"Ready to parse documents."
+        )
     else:
-        return "LlamaParse MCP is running but LLAMA_CLOUD_API_KEY is not set. Please configure it."
+        return "Document AI MCP is running but no credentials are configured. Set GOOGLE_DOCAI_CREDENTIALS_PATH."
 
 
 # --- Starlette app with SSE transport + well-known endpoints for Claude.ai ---
@@ -202,7 +185,7 @@ async def register(request):
     """Dynamic client registration endpoint — accept any registration."""
     body = await request.json()
     return JSONResponse({
-        "client_id": "llamaparse-public-client",
+        "client_id": "docai-public-client",
         "client_secret": "",
         "client_name": body.get("client_name", "Claude"),
         "redirect_uris": body.get("redirect_uris", []),
