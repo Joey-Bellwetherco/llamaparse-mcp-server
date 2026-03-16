@@ -1,10 +1,15 @@
 import os
 import asyncio
 import base64
+import json
 import httpx
 import uvicorn
 from mcp.server.fastmcp import FastMCP
 from dotenv import load_dotenv
+from starlette.applications import Starlette
+from starlette.routing import Route, Mount
+from starlette.responses import JSONResponse
+from mcp.server.sse import SseServerTransport
 
 load_dotenv()
 
@@ -154,36 +159,67 @@ async def check_status() -> str:
         return "LlamaParse MCP is running but LLAMA_CLOUD_API_KEY is not set. Please configure it."
 
 
+# --- Starlette app with SSE transport + well-known endpoints for Claude.ai ---
+
+sse = SseServerTransport("/messages/")
+
+
+async def handle_sse(request):
+    async with sse.connect_sse(
+        request.scope, request.receive, request._send
+    ) as (read_stream, write_stream):
+        await mcp._mcp_server.run(
+            read_stream,
+            write_stream,
+            mcp._mcp_server.create_initialization_options(),
+        )
+
+
+async def health(request):
+    return JSONResponse({"status": "ok"})
+
+
+async def oauth_protected_resource(request):
+    """Tell clients no auth is required (MCP 2025-03-26 spec)."""
+    return JSONResponse({
+        "resource": f"https://{request.headers.get('host', 'localhost')}",
+        "bearer_methods_supported": [],
+        "resource_documentation": "https://github.com/Joey-Bellwetherco/llamaparse-mcp-server",
+    })
+
+
+async def oauth_authorization_server(request):
+    """Return empty/minimal OAuth metadata since we don't require auth."""
+    return JSONResponse({
+        "issuer": f"https://{request.headers.get('host', 'localhost')}",
+        "authorization_endpoint": f"https://{request.headers.get('host', 'localhost')}/authorize",
+        "token_endpoint": f"https://{request.headers.get('host', 'localhost')}/token",
+        "response_types_supported": ["code"],
+    })
+
+
+async def register(request):
+    """Dynamic client registration endpoint — accept any registration."""
+    body = await request.json()
+    return JSONResponse({
+        "client_id": "llamaparse-public-client",
+        "client_secret": "",
+        "client_name": body.get("client_name", "Claude"),
+        "redirect_uris": body.get("redirect_uris", []),
+    })
+
+
+app = Starlette(
+    routes=[
+        Route("/health", health),
+        Route("/sse", endpoint=handle_sse),
+        Mount("/messages/", app=sse.handle_post_message),
+        Route("/.well-known/oauth-protected-resource", oauth_protected_resource),
+        Route("/.well-known/oauth-authorization-server", oauth_authorization_server),
+        Route("/register", register, methods=["POST"]),
+    ],
+)
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-
-    # Use SSE transport served via starlette/uvicorn
-    from starlette.applications import Starlette
-    from starlette.routing import Mount, Route
-    from starlette.responses import JSONResponse
-    from mcp.server.sse import SseServerTransport
-
-    sse = SseServerTransport("/messages/")
-
-    async def handle_sse(request):
-        async with sse.connect_sse(
-            request.scope, request.receive, request._send
-        ) as (read_stream, write_stream):
-            await mcp._mcp_server.run(
-                read_stream,
-                write_stream,
-                mcp._mcp_server.create_initialization_options(),
-            )
-
-    async def health(request):
-        return JSONResponse({"status": "ok"})
-
-    app = Starlette(
-        routes=[
-            Route("/health", health),
-            Route("/sse", endpoint=handle_sse),
-            Mount("/messages/", app=sse.handle_post_message),
-        ],
-    )
-
     uvicorn.run(app, host="0.0.0.0", port=port)
