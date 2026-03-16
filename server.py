@@ -1,4 +1,5 @@
 import os
+import io
 import json
 import base64
 import asyncio
@@ -12,6 +13,7 @@ from starlette.responses import JSONResponse
 from mcp.server.sse import SseServerTransport
 from google.cloud import documentai_v1 as documentai
 from google.oauth2 import service_account
+from pypdf import PdfReader, PdfWriter
 
 load_dotenv()
 
@@ -43,14 +45,60 @@ def _get_docai_client():
         )
 
 
-def _process_document(file_content: bytes, mime_type: str = "application/pdf") -> str:
-    """Send a document to Document AI and return the parsed text."""
+CHUNK_SIZE = 15  # Document AI online limit is 15 pages per request
+MAX_CONCURRENT = 10  # Max parallel requests to Document AI
+
+
+def _split_pdf(pdf_bytes: bytes) -> list[bytes]:
+    """Split a PDF into chunks of CHUNK_SIZE pages. Returns list of PDF bytes."""
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    total_pages = len(reader.pages)
+
+    if total_pages <= CHUNK_SIZE:
+        return [pdf_bytes]
+
+    chunks = []
+    for start in range(0, total_pages, CHUNK_SIZE):
+        writer = PdfWriter()
+        for page_num in range(start, min(start + CHUNK_SIZE, total_pages)):
+            writer.add_page(reader.pages[page_num])
+        buf = io.BytesIO()
+        writer.write(buf)
+        chunks.append(buf.getvalue())
+
+    return chunks
+
+
+def _process_single_chunk(file_content: bytes, mime_type: str) -> str:
+    """Send a single document chunk to Document AI and return parsed text."""
     client = _get_docai_client()
     resource_name = client.processor_path(GCP_PROJECT_ID, GCP_LOCATION, GCP_PROCESSOR_ID)
     raw_document = documentai.RawDocument(content=file_content, mime_type=mime_type)
     request = documentai.ProcessRequest(name=resource_name, raw_document=raw_document)
     result = client.process_document(request=request)
     return result.document.text
+
+
+async def _process_document(file_content: bytes, mime_type: str = "application/pdf") -> str:
+    """Process a document, splitting large PDFs into parallel chunks."""
+    if mime_type == "application/pdf":
+        chunks = _split_pdf(file_content)
+    else:
+        # Images can't be split — send as-is
+        chunks = [file_content]
+
+    if len(chunks) == 1:
+        return await asyncio.to_thread(_process_single_chunk, chunks[0], mime_type)
+
+    # Process all chunks in parallel with a concurrency limit
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+
+    async def process_with_limit(chunk: bytes) -> str:
+        async with semaphore:
+            return await asyncio.to_thread(_process_single_chunk, chunk, mime_type)
+
+    results = await asyncio.gather(*[process_with_limit(c) for c in chunks])
+    return "\n\n".join(results)
 
 
 mcp = FastMCP("Document AI MCP")
@@ -80,7 +128,7 @@ async def parse_document_base64(
         return "Error: Invalid base64 encoding. Please send a valid base64-encoded document."
 
     try:
-        result = await asyncio.to_thread(_process_document, file_bytes, mime_type)
+        result = await _process_document(file_bytes, mime_type)
         return result
     except Exception as e:
         return f"Error: {str(e)}"
@@ -120,7 +168,7 @@ async def parse_document_from_url(
         mime_type = "image/tiff"
 
     try:
-        result = await asyncio.to_thread(_process_document, file_bytes, mime_type)
+        result = await _process_document(file_bytes, mime_type)
         return result
     except Exception as e:
         return f"Error: {str(e)}"
