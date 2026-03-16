@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from starlette.applications import Starlette
 from starlette.routing import Route, Mount
 from starlette.requests import Request
-from starlette.responses import JSONResponse, PlainTextResponse, HTMLResponse
+from starlette.responses import JSONResponse, PlainTextResponse, HTMLResponse, Response
 from mcp.server.sse import SseServerTransport
 from google.cloud import documentai_v1 as documentai
 from google.oauth2 import service_account
@@ -26,6 +26,7 @@ UPLOAD_PAGE_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/png" href="/favicon-32.png">
 <title>Document AI Parser</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -499,6 +500,13 @@ async def homepage(request):
     return HTMLResponse(UPLOAD_PAGE_HTML)
 
 
+async def favicon(request):
+    """Serve the favicon."""
+    favicon_path = os.path.join(os.path.dirname(__file__), "favicon-32.png")
+    with open(favicon_path, "rb") as f:
+        return Response(f.read(), media_type="image/png")
+
+
 async def health(request):
     return JSONResponse({"status": "ok"})
 
@@ -663,6 +671,8 @@ async def register(request):
 app = Starlette(
     routes=[
         Route("/", homepage),
+        Route("/favicon-32.png", favicon),
+        Route("/favicon.ico", favicon),
         Route("/health", health),
         Route("/parse", parse_endpoint, methods=["POST"]),
         Route("/upload/{token}", token_upload_endpoint, methods=["POST"]),
