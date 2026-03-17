@@ -328,24 +328,6 @@ async def get_parsed_result(
 
 
 @mcp.tool()
-async def list_parsed_documents() -> str:
-    """List all documents that have been parsed and are available for retrieval.
-
-    Returns document IDs, filenames, and page counts.
-    """
-    if not _parsed_results:
-        return f"No parsed documents available. Upload a file at {UPLOAD_URL} to get started."
-
-    lines = []
-    for doc_id, entry in _parsed_results.items():
-        lines.append(
-            f"- {entry['filename']}: {entry['pages']} pages, "
-            f"{len(entry['text'])} chars (id: {doc_id})"
-        )
-    return "Parsed documents:\n" + "\n".join(lines)
-
-
-@mcp.tool()
 async def get_upload_url(
     filename: str = "document.pdf",
 ) -> str:
@@ -473,7 +455,7 @@ async def check_status() -> str:
             f"3. Call get_parsed_result(document_id) with the ID from the curl response\n\n"
             f"For URLs: call parse_document_from_url(url) directly.\n"
             f"Manual upload: {UPLOAD_URL}\n\n"
-            f"Cached documents: {len(_parsed_results)}"
+            f"Processor: Layout Parser with Gemini"
         )
     else:
         return "Document AI MCP is running but no credentials are configured. Set GOOGLE_DOCAI_CREDENTIALS_PATH."
