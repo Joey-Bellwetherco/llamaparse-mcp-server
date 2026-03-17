@@ -5,6 +5,7 @@ import json
 import uuid
 import time
 import base64
+import hashlib
 import asyncio
 import httpx
 import uvicorn
@@ -266,8 +267,22 @@ async def _process_document(file_content: bytes, mime_type: str = "application/p
 
 # --- Parsed result cache + upload tokens ---
 _parsed_results: dict[str, dict] = {}  # id -> {"text": str, "pages": int, "filename": str}
+_content_hash_to_id: dict[str, str] = {}  # sha256 hash -> doc_id (for cache dedup)
 _upload_tokens: dict[str, dict] = {}   # token -> {"created": float, "filename": str}
 UPLOAD_TOKEN_TTL = 300  # 5 minutes
+
+
+def _check_cache(file_bytes: bytes) -> str | None:
+    """Return cached doc_id if this file content was already parsed, else None."""
+    content_hash = hashlib.sha256(file_bytes).hexdigest()
+    return _content_hash_to_id.get(content_hash)
+
+
+def _store_result(doc_id: str, file_bytes: bytes, text: str, pages: int, filename: str):
+    """Store a parsed result and its content hash for dedup."""
+    _parsed_results[doc_id] = {"text": text, "pages": pages, "filename": filename}
+    content_hash = hashlib.sha256(file_bytes).hexdigest()
+    _content_hash_to_id[content_hash] = doc_id
 
 mcp = FastMCP("Document AI MCP")
 
@@ -402,6 +417,21 @@ async def parse_document_from_url(
 
     filename = url.split("/")[-1].split("?")[0] or "document.pdf"
 
+    # Check cache first
+    cached_id = _check_cache(file_bytes)
+    if cached_id:
+        entry = _parsed_results[cached_id]
+        result = entry["text"]
+        page_count = entry["pages"]
+        if len(result) < 50000:
+            return f"[Cached: {entry['filename']}, {page_count} pages, id: {cached_id}]\n\n{result}"
+        else:
+            return (
+                f"[Cached: {entry['filename']}, {page_count} pages, {len(result)} chars]\n"
+                f"Result is large. Use get_parsed_result(document_id='{cached_id}') to retrieve "
+                f"page ranges. Example: get_parsed_result('{cached_id}', page_start=1, page_end=10)"
+            )
+
     try:
         result = await _process_document(file_bytes, mime_type)
 
@@ -418,11 +448,7 @@ async def parse_document_from_url(
 
         # Cache the result
         doc_id = str(uuid.uuid4())[:8]
-        _parsed_results[doc_id] = {
-            "text": result,
-            "pages": page_count,
-            "filename": filename,
-        }
+        _store_result(doc_id, file_bytes, result, page_count, filename)
 
         # For small results return inline, for large ones return summary + ID
         if len(result) < 50000:
@@ -516,6 +542,19 @@ async def parse_endpoint(request: Request):
     if not file_bytes:
         return JSONResponse({"error": "Empty file"}, status_code=400)
 
+    # Check cache first — skip re-parsing if same file was already processed
+    cached_id = _check_cache(file_bytes)
+    if cached_id:
+        entry = _parsed_results[cached_id]
+        return JSONResponse({
+            "document_id": cached_id,
+            "filename": entry["filename"],
+            "pages": entry["pages"],
+            "chars": len(entry["text"]),
+            "cached": True,
+            "message": f"Found cached result. Use get_parsed_result(document_id='{cached_id}') to retrieve the text.",
+        })
+
     # Count pages
     page_count = 0
     if mime_type == "application/pdf":
@@ -533,11 +572,7 @@ async def parse_endpoint(request: Request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
     doc_id = str(uuid.uuid4())[:8]
-    _parsed_results[doc_id] = {
-        "text": result,
-        "pages": page_count,
-        "filename": filename,
-    }
+    _store_result(doc_id, file_bytes, result, page_count, filename)
 
     return JSONResponse({
         "document_id": doc_id,
@@ -585,6 +620,18 @@ async def token_upload_endpoint(request: Request):
     if not file_bytes:
         return JSONResponse({"error": "Empty file"}, status_code=400)
 
+    # Check cache first
+    cached_id = _check_cache(file_bytes)
+    if cached_id:
+        entry = _parsed_results[cached_id]
+        return JSONResponse({
+            "document_id": cached_id,
+            "filename": entry["filename"],
+            "pages": entry["pages"],
+            "chars": len(entry["text"]),
+            "cached": True,
+        })
+
     page_count = 0
     if mime_type == "application/pdf":
         try:
@@ -601,11 +648,7 @@ async def token_upload_endpoint(request: Request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
     doc_id = str(uuid.uuid4())[:8]
-    _parsed_results[doc_id] = {
-        "text": result,
-        "pages": page_count,
-        "filename": filename,
-    }
+    _store_result(doc_id, file_bytes, result, page_count, filename)
 
     return JSONResponse({
         "document_id": doc_id,
