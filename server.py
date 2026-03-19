@@ -171,44 +171,60 @@ def _split_pdf(pdf_bytes: bytes) -> list[bytes]:
 
 
 def _reconstruct_page_text(rows: list, page_offset: int = 0) -> str:
-    """Convert SQL result rows into text with [Page N] markers and markdown tables.
+    """Convert SQL result rows into structured text with [Page N] markers.
 
-    rows: list of [page_idx, elem_idx, element_type, content]
+    rows: list of [page_idx, elem_idx, element_type, content, description]
     page_offset: added to page_idx for correct numbering in chunked processing
     """
     if not rows:
         return ""
 
-    pages: dict[int, dict] = {}
+    pages: dict[int, list] = {}
     for row in rows:
         page_idx = int(row[0]) if row[0] is not None else 0
         elem_type = (row[2] or "text").strip()
         content = (row[3] or "").strip()
-        if not content:
+        description = (row[4] or "").strip() if len(row) > 4 else ""
+
+        # Use content if available, fall back to description (e.g. for figures)
+        text = content or description
+        if not text:
             continue
+
         if page_idx not in pages:
-            pages[page_idx] = {"text": [], "tables": []}
+            pages[page_idx] = []
+
         if elem_type == "table":
-            pages[page_idx]["tables"].append(content)
+            pages[page_idx].append(f"[Table]\n{text}")
+        elif elem_type == "figure":
+            if content and description:
+                pages[page_idx].append(f"[Figure: {description}]\n{content}")
+            elif description:
+                pages[page_idx].append(f"[Figure: {description}]")
+            else:
+                pages[page_idx].append(content)
+        elif elem_type == "title":
+            pages[page_idx].append(f"# {text}")
+        elif elem_type == "section_header":
+            pages[page_idx].append(f"## {text}")
         else:
-            pages[page_idx]["text"].append(content)
+            pages[page_idx].append(text)
 
     output_parts = []
     for page_idx in sorted(pages.keys()):
         page_num = page_idx + 1 + page_offset
         output_parts.append(f"[Page {page_num}]")
-        page_data = pages[page_idx]
-        if page_data["text"]:
-            output_parts.append("\n".join(page_data["text"]))
-        for j, table_content in enumerate(page_data["tables"]):
-            output_parts.append(f"[Table {j+1} on page {page_num}]\n{table_content}")
+        output_parts.append("\n".join(pages[page_idx]))
 
     return "\n\n".join(output_parts)
 
 
 _PARSE_SQL_TEMPLATE = """
 WITH parsed AS (
-    SELECT ai_parse_document(content, map('version', '2.0')) AS doc
+    SELECT ai_parse_document(content, map(
+        'version', '2.0',
+        'descriptionElementTypes', '*'
+    )) AS doc
     FROM read_files('{volume_path}', format => 'binaryFile')
 ),
 elements AS (
@@ -221,7 +237,8 @@ SELECT
     variant_get(element, '$.bbox[0].page_id', 'INT') AS page_idx,
     elem_idx,
     variant_get(element, '$.type', 'STRING') AS element_type,
-    variant_get(element, '$.content', 'STRING') AS content
+    variant_get(element, '$.content', 'STRING') AS content,
+    variant_get(element, '$.description', 'STRING') AS description
 FROM elements
 ORDER BY page_idx, elem_idx
 """
