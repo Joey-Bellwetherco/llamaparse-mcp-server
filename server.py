@@ -326,21 +326,43 @@ def _extract_pymupdf_reference(pdf_bytes: bytes) -> dict[int, str]:
 _PROOFREAD_SQL_TEMPLATE = """
 SELECT ai_query(
     'databricks-meta-llama-3-3-70b-instruct',
-    'You are a document proofreader. Compare the PARSED OUTPUT against the REFERENCE TEXT (native PDF text extraction).
+    'You are a precision document correction engine. You have two inputs:
 
-Fix ONLY these specific issues in the parsed output:
-- Wrong characters (e.g. "0" vs "O", "1" vs "l", "rn" vs "m")
-- Wrong numbers or values that differ from the reference
-- Swapped or misaligned table columns
-- Missing text that appears in the reference but not the parsed output
+PARSED OUTPUT — from an AI document parser. It has good structure and layout (headings, tables, figures) but may contain small errors from OCR/visual parsing.
+
+REFERENCE TEXT — extracted directly from the native PDF text layer. This is the GROUND TRUTH for any text that appears in both. It is character-perfect but has no structure, may contain hidden/overlapping text artifacts, and has no table formatting.
+
+YOUR JOB: Use the reference text to correct errors in the parsed output while keeping the parsed output''s structure intact.
+
+CORRECTIONS TO MAKE (use reference as ground truth):
+- Wrong characters: "0" vs "O", "1" vs "l" vs "I", "rn" vs "m", "cl" vs "d", "S" vs "$", etc.
+- Wrong or slightly off numbers, dollar amounts, percentages, dates, rates
+- Misread decimals: "7.6" vs "76", commas vs periods in numbers
+- Merged words or broken words (missing/extra spaces)
+- Swapped, shifted, or misaligned table columns or rows
+- Missing text that exists in the reference but was dropped from parsed output
+- Truncated words or sentences
+- Wrong currency symbols, units, or special characters (%, ±, °, ™, etc.)
+- Scrambled or reordered text within a line
+- Headers/footers/page numbers bleeding into body content
+- Footnote markers mixed into running text
+- Repeated or duplicated text that only appears once in reference
+- Wrong capitalization or case changes
+- Accented characters or unicode that got replaced with ASCII equivalents
+
+KEEP UNCHANGED:
+- All [Page N], [Table], [Figure:], ##, # markers and structure
+- Layout and ordering of sections
+- Any text that matches between both sources
 
 DO NOT:
-- Remove [Page N], [Table], [Figure:] markers — keep all structure
-- Add text that appears in neither source (reference may contain hidden/overlapping text — ignore those)
-- Change formatting or layout
-- Add commentary or explanations
+- Add text that appears ONLY in the reference but not in the parsed output (reference may contain hidden layers, watermarks, or overlapping objects)
+- Add commentary, notes, or explanations
+- Reformat tables or change markdown structure
+- Invent or hallucinate content
 
-Return ONLY the corrected parsed output, nothing else.
+If the parsed output and reference agree, return the parsed output unchanged.
+Return ONLY the corrected text. Nothing else.
 
 PARSED OUTPUT:
 {parsed_text}
