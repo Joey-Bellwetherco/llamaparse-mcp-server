@@ -664,7 +664,7 @@ async def debug_processor_endpoint(request: Request):
         return JSONResponse({"error": "No credentials"}, status_code=500)
     try:
         client = _get_docai_client()
-        name = client.processor_path(GCP_PROJECT_ID, GCP_LOCATION, GCP_PROCESSOR_ID)
+        name = client.processor_path(GCP_PROJECT_ID, GCP_LOCATION, "8a96e920607e3974")
         proc = await asyncio.to_thread(client.get_processor, name=name)
         versions = await asyncio.to_thread(client.list_processor_versions, parent=name)
         version_list = []
