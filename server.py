@@ -4,7 +4,6 @@ import re
 import json
 import uuid
 import time
-import base64
 import hashlib
 import asyncio
 import httpx
@@ -16,9 +15,9 @@ from starlette.routing import Route, Mount
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, HTMLResponse, Response
 from mcp.server.sse import SseServerTransport
-from google.cloud import documentai_v1 as documentai
-from google.oauth2 import service_account
-from pypdf import PdfReader, PdfWriter
+from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.sql import StatementState
+from pypdf import PdfReader
 
 load_dotenv()
 
@@ -28,7 +27,7 @@ UPLOAD_PAGE_HTML = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <link rel="icon" type="image/png" href="/favicon-32.png">
-<title>Document AI Parser</title>
+<title>Databricks Document Parser</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -58,12 +57,12 @@ UPLOAD_PAGE_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="container">
-  <h1>Document AI Parser</h1>
-  <p class="sub">Upload a PDF or image to parse with Google Document AI OCR</p>
+  <h1>Databricks Document Parser</h1>
+  <p class="sub">Upload a PDF, image, or Office document to parse with Databricks AI</p>
   <div class="drop-zone" id="dropZone">
     <div class="icon">📄</div>
     <p>Drag & drop a file here, or click to browse</p>
-    <input type="file" id="fileInput" accept=".pdf,.png,.jpg,.jpeg,.tiff,.gif,.bmp,.webp">
+    <input type="file" id="fileInput" accept=".pdf,.png,.jpg,.jpeg,.docx,.pptx">
   </div>
   <div id="status"></div>
 </div>
@@ -105,164 +104,156 @@ async function uploadFile(file) {
 </body>
 </html>"""
 
-# Google Document AI config
-GCP_PROJECT_ID = os.environ.get("GOOGLE_DOCAI_PROJECT_ID", "decoded-flag-490415-n5")
-GCP_LOCATION = os.environ.get("GOOGLE_DOCAI_LOCATION", "us")
-GCP_PROCESSOR_ID = os.environ.get("GOOGLE_DOCAI_PROCESSOR_ID", "8a96e920607e3974")
+# Databricks config
+DATABRICKS_HOST = os.environ.get("DATABRICKS_HOST", "")
+DATABRICKS_TOKEN = os.environ.get("DATABRICKS_TOKEN", "")
+DATABRICKS_WAREHOUSE_ID = os.environ.get("DATABRICKS_WAREHOUSE_ID", "")
+DATABRICKS_VOLUME_PATH = os.environ.get(
+    "DATABRICKS_VOLUME_PATH",
+    "/Volumes/bellwether_dev/default/staging/tmp"
+)
 
-# Service account credentials — base64-encoded JSON string
-GOOGLE_DOCAI_CREDENTIALS_PATH = os.environ.get("GOOGLE_DOCAI_CREDENTIALS_PATH", "")
+
+_workspace_client = None
+_warehouse_id = None
 
 
-def _get_docai_client():
-    """Create a Document AI client with proper credentials."""
-    endpoint = f"{GCP_LOCATION}-documentai.googleapis.com"
-    if GOOGLE_DOCAI_CREDENTIALS_PATH:
-        decoded = base64.b64decode(GOOGLE_DOCAI_CREDENTIALS_PATH)
-        info = json.loads(decoded)
-        creds = service_account.Credentials.from_service_account_info(info)
-        return documentai.DocumentProcessorServiceClient(
-            credentials=creds,
-            client_options={"api_endpoint": endpoint},
+def _get_databricks_client() -> WorkspaceClient:
+    """Create or return cached Databricks WorkspaceClient."""
+    global _workspace_client
+    if _workspace_client is None:
+        _workspace_client = WorkspaceClient(
+            host=DATABRICKS_HOST,
+            token=DATABRICKS_TOKEN,
         )
-    else:
-        return documentai.DocumentProcessorServiceClient(
-            client_options={"api_endpoint": endpoint},
-        )
+    return _workspace_client
 
 
-CHUNK_SIZE = 15  # Document AI online limit is 15 pages per request
-MAX_CONCURRENT = 10  # Max parallel requests to Document AI
+def _get_warehouse_id() -> str:
+    """Return configured warehouse ID or auto-discover one."""
+    global _warehouse_id
+    if _warehouse_id is None:
+        if DATABRICKS_WAREHOUSE_ID:
+            _warehouse_id = DATABRICKS_WAREHOUSE_ID
+        else:
+            w = _get_databricks_client()
+            for wh in w.warehouses.list():
+                if wh.enable_serverless_compute or str(wh.state) == "RUNNING":
+                    _warehouse_id = wh.id
+                    break
+            if not _warehouse_id:
+                raise RuntimeError("No available SQL warehouse found. Set DATABRICKS_WAREHOUSE_ID.")
+    return _warehouse_id
 
 
-def _split_pdf(pdf_bytes: bytes) -> list[bytes]:
-    """Split a PDF into chunks of CHUNK_SIZE pages. Returns list of PDF bytes."""
-    reader = PdfReader(io.BytesIO(pdf_bytes))
-    total_pages = len(reader.pages)
+def _reconstruct_page_text(rows: list) -> str:
+    """Convert SQL result rows into text with [Page N] markers and markdown tables.
 
-    if total_pages <= CHUNK_SIZE:
-        return [pdf_bytes]
+    rows: list of [page_idx, elem_idx, element_type, content]
+    """
+    if not rows:
+        return "(No content extracted from document)"
 
-    chunks = []
-    for start in range(0, total_pages, CHUNK_SIZE):
-        writer = PdfWriter()
-        for page_num in range(start, min(start + CHUNK_SIZE, total_pages)):
-            writer.add_page(reader.pages[page_num])
-        buf = io.BytesIO()
-        writer.write(buf)
-        chunks.append(buf.getvalue())
-
-    return chunks
-
-
-def _extract_tables_from_page(page, document_text: str) -> list[str]:
-    """Extract tables from a page as markdown-formatted tables."""
-    tables = []
-    for table in page.tables:
-        rows = []
-        for header_row in table.header_rows:
-            cells = []
-            for cell in header_row.cells:
-                text = _get_text_from_layout(cell.layout, document_text).strip()
-                cells.append(text)
-            rows.append("| " + " | ".join(cells) + " |")
-            rows.append("| " + " | ".join(["---"] * len(cells)) + " |")
-        for body_row in table.body_rows:
-            cells = []
-            for cell in body_row.cells:
-                text = _get_text_from_layout(cell.layout, document_text).strip()
-                cells.append(text)
-            rows.append("| " + " | ".join(cells) + " |")
-        if rows:
-            tables.append("\n".join(rows))
-    return tables
-
-
-def _get_text_from_layout(layout, document_text: str) -> str:
-    """Extract text from a layout element using text anchors."""
-    text = ""
-    for segment in layout.text_anchor.text_segments:
-        start = int(segment.start_index) if segment.start_index else 0
-        end = int(segment.end_index)
-        text += document_text[start:end]
-    return text
-
-
-def _get_page_text(page, document_text: str) -> str:
-    """Extract the text content for a single page using its layout text anchor."""
-    if page.layout and page.layout.text_anchor and page.layout.text_anchor.text_segments:
-        parts = []
-        for segment in page.layout.text_anchor.text_segments:
-            start = int(segment.start_index) if segment.start_index else 0
-            end = int(segment.end_index)
-            parts.append(document_text[start:end])
-        return "".join(parts)
-    return ""
-
-
-def _process_single_chunk(file_content: bytes, mime_type: str, page_offset: int = 0) -> str:
-    """Send a single document chunk to Document AI and return parsed text with page markers and tables."""
-    client = _get_docai_client()
-    resource_name = client.processor_path(GCP_PROJECT_ID, GCP_LOCATION, GCP_PROCESSOR_ID)
-    raw_document = documentai.RawDocument(content=file_content, mime_type=mime_type)
-
-    # Layout Parser with Gemini — uses layout_config, not ocr_config
-    process_options = documentai.ProcessOptions(
-        layout_config=documentai.ProcessOptions.LayoutConfig(
-            chunking_config=documentai.ProcessOptions.LayoutConfig.ChunkingConfig(
-                chunk_size=1000,
-                include_ancestor_headings=True,
-            ),
-        ),
-    )
-
-    request = documentai.ProcessRequest(
-        name=resource_name,
-        raw_document=raw_document,
-        process_options=process_options,
-    )
-    result = client.process_document(request=request)
-    document = result.document
+    pages: dict[int, dict] = {}
+    for row in rows:
+        page_idx = int(row[0])
+        elem_type = (row[2] or "text").strip()
+        content = (row[3] or "").strip()
+        if not content:
+            continue
+        if page_idx not in pages:
+            pages[page_idx] = {"text": [], "tables": []}
+        if elem_type == "table":
+            pages[page_idx]["tables"].append(content)
+        else:
+            pages[page_idx]["text"].append(content)
 
     output_parts = []
-
-    for i, page in enumerate(document.pages):
-        page_num = page_offset + (page.page_number if page.page_number else i + 1)
-        page_text = _get_page_text(page, document.text).strip()
-
+    for page_idx in sorted(pages.keys()):
+        page_num = page_idx + 1  # 0-indexed to 1-indexed
         output_parts.append(f"[Page {page_num}]")
-        if page_text:
-            output_parts.append(page_text)
+        page_data = pages[page_idx]
+        if page_data["text"]:
+            output_parts.append("\n".join(page_data["text"]))
+        for j, table_content in enumerate(page_data["tables"]):
+            output_parts.append(f"[Table {j+1} on page {page_num}]\n{table_content}")
 
-        tables = _extract_tables_from_page(page, document.text)
-        for j, table_md in enumerate(tables):
-            output_parts.append(f"[Table {j+1} on page {page_num}]\n{table_md}")
-
-    return "\n\n".join(output_parts)
+    return "\n\n".join(output_parts) if output_parts else "(No content extracted from document)"
 
 
 async def _process_document(file_content: bytes, mime_type: str = "application/pdf") -> str:
-    """Process a document, splitting large PDFs into parallel chunks."""
-    if mime_type == "application/pdf":
-        chunks = _split_pdf(file_content)
-    else:
-        chunks = [file_content]
+    """Upload to Databricks Volume, parse via ai_parse_document, return text with [Page N] markers."""
+    w = _get_databricks_client()
+    warehouse_id = _get_warehouse_id()
 
-    if len(chunks) == 1:
-        return await asyncio.to_thread(_process_single_chunk, chunks[0], mime_type, 0)
+    # Determine file extension from mime type
+    ext_map = {
+        "application/pdf": ".pdf",
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/tiff": ".tiff",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    }
+    ext = ext_map.get(mime_type, ".pdf")
+    temp_filename = f"{uuid.uuid4().hex[:12]}{ext}"
+    volume_path = f"{DATABRICKS_VOLUME_PATH}/{temp_filename}"
 
-    semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+    try:
+        # Step 1: Upload to Unity Catalog Volume
+        await asyncio.to_thread(
+            w.files.upload,
+            file_path=volume_path,
+            contents=io.BytesIO(file_content),
+            overwrite=True,
+        )
 
-    async def process_with_limit(chunk: bytes, offset: int) -> str:
-        async with semaphore:
-            return await asyncio.to_thread(_process_single_chunk, chunk, mime_type, offset)
+        # Step 2: Execute ai_parse_document via SQL Statement Execution
+        sql = f"""
+        WITH parsed AS (
+            SELECT ai_parse_document(content, map('version', '2.0')) AS doc
+            FROM read_files('{volume_path}', format => 'binaryFile')
+        ),
+        pages AS (
+            SELECT posexplode(
+                variant_get(doc, '$.document.pages', 'ARRAY<VARIANT>')
+            ) AS (page_idx, page)
+            FROM parsed
+        ),
+        elements AS (
+            SELECT page_idx,
+                   posexplode(
+                       variant_get(page, '$.elements', 'ARRAY<VARIANT>')
+                   ) AS (elem_idx, element)
+            FROM pages
+        )
+        SELECT page_idx, elem_idx,
+               variant_get(element, '$.type', 'STRING') AS element_type,
+               variant_get(element, '$.content', 'STRING') AS content
+        FROM elements
+        ORDER BY page_idx, elem_idx
+        """
 
-    tasks = [
-        process_with_limit(c, i * CHUNK_SIZE)
-        for i, c in enumerate(chunks)
-    ]
-    results = await asyncio.gather(*tasks)
-    return "\n\n".join(results)
+        response = await asyncio.to_thread(
+            w.statement_execution.execute_statement,
+            warehouse_id=warehouse_id,
+            statement=sql,
+            wait_timeout="300s",
+        )
+
+        if response.status.state != StatementState.SUCCEEDED:
+            error_msg = response.status.error.message if response.status.error else "Unknown SQL error"
+            return f"Error parsing document: {error_msg}"
+
+        # Step 3: Reconstruct [Page N] markers from SQL result
+        return _reconstruct_page_text(response.result.data_array or [])
+
+    finally:
+        # Step 4: Cleanup temp file from Volume
+        try:
+            await asyncio.to_thread(w.files.delete, file_path=volume_path)
+        except Exception:
+            pass  # Best-effort cleanup
 
 
 # --- Parsed result cache + upload tokens ---
@@ -284,7 +275,7 @@ def _store_result(doc_id: str, file_bytes: bytes, text: str, pages: int, filenam
     content_hash = hashlib.sha256(file_bytes).hexdigest()
     _content_hash_to_id[content_hash] = doc_id
 
-mcp = FastMCP("Document AI MCP")
+mcp = FastMCP("Databricks Document Parser MCP")
 
 
 @mcp.tool()
@@ -386,17 +377,17 @@ async def parse_document_from_url(
     url: str,
     mime_type: str = "application/pdf",
 ) -> str:
-    """Parse a document from a URL using Google Document AI with visual OCR.
+    """Parse a document from a URL using Databricks AI.
 
-    Provide a URL to a document (PDF or image) and get back the parsed text content.
+    Provide a URL to a document (PDF, image, or Office document) and get back the parsed text content.
     For large documents, the result is cached — use get_parsed_result to retrieve pages.
 
     Args:
         url: Direct URL to a document file
         mime_type: MIME type of the document (default: application/pdf)
     """
-    if not GOOGLE_DOCAI_CREDENTIALS_PATH:
-        return "Error: No Google Cloud credentials configured. Set GOOGLE_DOCAI_CREDENTIALS_PATH."
+    if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
+        return "Error: No Databricks credentials configured. Set DATABRICKS_HOST and DATABRICKS_TOKEN."
 
     try:
         async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
@@ -414,6 +405,10 @@ async def parse_document_from_url(
         mime_type = "image/jpeg"
     elif lower_url.endswith(".tiff"):
         mime_type = "image/tiff"
+    elif lower_url.endswith(".docx"):
+        mime_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    elif lower_url.endswith(".pptx"):
+        mime_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 
     filename = url.split("/")[-1].split("?")[0] or "document.pdf"
 
@@ -468,23 +463,29 @@ UPLOAD_URL = os.environ.get("PUBLIC_URL", "https://bw-parse-mcp-server.up.railwa
 
 @mcp.tool()
 async def check_status() -> str:
-    """Check if the Document AI MCP server is configured and ready.
+    """Check if the Databricks Document Parser MCP server is configured and ready."""
+    if DATABRICKS_HOST and DATABRICKS_TOKEN:
+        warehouse_info = ""
+        try:
+            wid = _get_warehouse_id()
+            warehouse_info = f"\nSQL Warehouse: {wid}"
+        except Exception as e:
+            warehouse_info = f"\nWarehouse discovery: {e}"
 
-    Also returns the upload URL where users can upload PDFs for parsing.
-    """
-    if GOOGLE_DOCAI_CREDENTIALS_PATH:
         return (
-            f"Document AI MCP is running and ready.\n\n"
+            f"Databricks Document Parser MCP is running and ready.\n\n"
             f"IMPORTANT: To parse a PDF, NEVER base64-encode it. Instead:\n"
             f"1. Call get_upload_url(filename) to get a one-time upload URL\n"
             f"2. In code execution, run: curl -s -X POST \"<url>\" -F \"file=@/path/to/file.pdf\"\n"
             f"3. Call get_parsed_result(document_id) with the ID from the curl response\n\n"
             f"For URLs: call parse_document_from_url(url) directly.\n"
             f"Manual upload: {UPLOAD_URL}\n\n"
-            f"Processor: Layout Parser with Gemini"
+            f"Host: {DATABRICKS_HOST}{warehouse_info}\n"
+            f"Volume: {DATABRICKS_VOLUME_PATH}\n"
+            f"Supported formats: PDF, PNG, JPG, DOCX, PPTX"
         )
     else:
-        return "Document AI MCP is running but no credentials are configured. Set GOOGLE_DOCAI_CREDENTIALS_PATH."
+        return "Databricks Document Parser MCP is running but no credentials are configured. Set DATABRICKS_HOST and DATABRICKS_TOKEN."
 
 
 # --- Starlette app with SSE transport + HTTP endpoints ---
@@ -516,13 +517,21 @@ async def favicon(request):
 
 
 async def health(request):
-    return JSONResponse({"status": "ok"})
+    status = {"status": "ok"}
+    if DATABRICKS_HOST and DATABRICKS_TOKEN:
+        try:
+            w = _get_databricks_client()
+            me = await asyncio.to_thread(w.current_user.me)
+            status["databricks"] = {"user": me.user_name, "host": DATABRICKS_HOST}
+        except Exception as e:
+            status["databricks"] = {"error": str(e)}
+    return JSONResponse(status)
 
 
 async def parse_endpoint(request: Request):
     """Upload + parse in one step. Returns a document_id for MCP tool retrieval."""
-    if not GOOGLE_DOCAI_CREDENTIALS_PATH:
-        return JSONResponse({"error": "No credentials configured"}, status_code=500)
+    if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
+        return JSONResponse({"error": "No Databricks credentials configured"}, status_code=500)
 
     content_type = request.headers.get("content-type", "")
 
@@ -599,8 +608,8 @@ async def token_upload_endpoint(request: Request):
     if time.time() - token_data["created"] > UPLOAD_TOKEN_TTL:
         return JSONResponse({"error": "Upload token expired. Request a new one."}, status_code=403)
 
-    if not GOOGLE_DOCAI_CREDENTIALS_PATH:
-        return JSONResponse({"error": "No credentials configured"}, status_code=500)
+    if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
+        return JSONResponse({"error": "No Databricks credentials configured"}, status_code=500)
 
     content_type = request.headers.get("content-type", "")
 
@@ -686,7 +695,7 @@ async def oauth_authorization_server(request):
 async def register(request):
     body = await request.json()
     return JSONResponse({
-        "client_id": "docai-public-client",
+        "client_id": "databricks-parser-public-client",
         "client_secret": "",
         "client_name": body.get("client_name", "Claude"),
         "redirect_uris": body.get("redirect_uris", []),
