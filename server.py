@@ -4,6 +4,7 @@ import re
 import json
 import uuid
 import time
+import base64
 import hashlib
 import asyncio
 import httpx
@@ -18,6 +19,14 @@ from mcp.server.sse import SseServerTransport
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.sql import StatementState
 from pypdf import PdfReader, PdfWriter
+
+# Optional Google Document AI imports (for compare mode)
+try:
+    from google.cloud import documentai_v1 as documentai
+    from google.oauth2 import service_account
+    GOOGLE_DOCAI_AVAILABLE = True
+except ImportError:
+    GOOGLE_DOCAI_AVAILABLE = False
 
 load_dotenv()
 
@@ -112,6 +121,145 @@ DATABRICKS_VOLUME_PATH = os.environ.get(
     "DATABRICKS_VOLUME_PATH",
     "/Volumes/bellwether_dev/default/staging/tmp"
 )
+
+
+# Google Document AI config (optional — for compare mode)
+GCP_PROJECT_ID = os.environ.get("GOOGLE_DOCAI_PROJECT_ID", "decoded-flag-490415-n5")
+GCP_LOCATION = os.environ.get("GOOGLE_DOCAI_LOCATION", "us")
+GCP_PROCESSOR_ID = os.environ.get("GOOGLE_DOCAI_PROCESSOR_ID", "8a96e920607e3974")
+GOOGLE_DOCAI_CREDENTIALS_PATH = os.environ.get("GOOGLE_DOCAI_CREDENTIALS_PATH", "")
+
+
+def _get_docai_client():
+    """Create a Document AI client with proper credentials."""
+    if not GOOGLE_DOCAI_AVAILABLE:
+        raise RuntimeError("google-cloud-documentai not installed. Run: pip install google-cloud-documentai google-auth")
+    endpoint = f"{GCP_LOCATION}-documentai.googleapis.com"
+    if GOOGLE_DOCAI_CREDENTIALS_PATH:
+        decoded = base64.b64decode(GOOGLE_DOCAI_CREDENTIALS_PATH)
+        info = json.loads(decoded)
+        creds = service_account.Credentials.from_service_account_info(info)
+        return documentai.DocumentProcessorServiceClient(
+            credentials=creds,
+            client_options={"api_endpoint": endpoint},
+        )
+    else:
+        return documentai.DocumentProcessorServiceClient(
+            client_options={"api_endpoint": endpoint},
+        )
+
+
+def _extract_tables_from_page(page, document_text: str) -> list[str]:
+    """Extract tables from a page as markdown-formatted tables."""
+    tables = []
+    for table in page.tables:
+        rows = []
+        for header_row in table.header_rows:
+            cells = []
+            for cell in header_row.cells:
+                text = _get_text_from_layout(cell.layout, document_text).strip()
+                cells.append(text)
+            rows.append("| " + " | ".join(cells) + " |")
+            rows.append("| " + " | ".join(["---"] * len(cells)) + " |")
+        for body_row in table.body_rows:
+            cells = []
+            for cell in body_row.cells:
+                text = _get_text_from_layout(cell.layout, document_text).strip()
+                cells.append(text)
+            rows.append("| " + " | ".join(cells) + " |")
+        if rows:
+            tables.append("\n".join(rows))
+    return tables
+
+
+def _get_text_from_layout(layout, document_text: str) -> str:
+    """Extract text from a layout element using text anchors."""
+    text = ""
+    for segment in layout.text_anchor.text_segments:
+        start = int(segment.start_index) if segment.start_index else 0
+        end = int(segment.end_index)
+        text += document_text[start:end]
+    return text
+
+
+def _get_page_text(page, document_text: str) -> str:
+    """Extract the text content for a single page using its layout text anchor."""
+    if page.layout and page.layout.text_anchor and page.layout.text_anchor.text_segments:
+        parts = []
+        for segment in page.layout.text_anchor.text_segments:
+            start = int(segment.start_index) if segment.start_index else 0
+            end = int(segment.end_index)
+            parts.append(document_text[start:end])
+        return "".join(parts)
+    return ""
+
+
+def _docai_process_single_chunk(file_content: bytes, mime_type: str, page_offset: int = 0) -> str:
+    """Send a single document chunk to Document AI and return parsed text."""
+    client = _get_docai_client()
+    resource_name = client.processor_path(GCP_PROJECT_ID, GCP_LOCATION, GCP_PROCESSOR_ID)
+    raw_document = documentai.RawDocument(content=file_content, mime_type=mime_type)
+    process_options = documentai.ProcessOptions(
+        layout_config=documentai.ProcessOptions.LayoutConfig(
+            chunking_config=documentai.ProcessOptions.LayoutConfig.ChunkingConfig(
+                chunk_size=1000,
+                include_ancestor_headings=True,
+            ),
+        ),
+    )
+    request = documentai.ProcessRequest(
+        name=resource_name,
+        raw_document=raw_document,
+        process_options=process_options,
+    )
+    result = client.process_document(request=request)
+    document = result.document
+    output_parts = []
+    for i, page in enumerate(document.pages):
+        page_num = page_offset + (page.page_number if page.page_number else i + 1)
+        page_text = _get_page_text(page, document.text).strip()
+        output_parts.append(f"[Page {page_num}]")
+        if page_text:
+            output_parts.append(page_text)
+        tables = _extract_tables_from_page(page, document.text)
+        for j, table_md in enumerate(tables):
+            output_parts.append(f"[Table {j+1} on page {page_num}]\n{table_md}")
+    return "\n\n".join(output_parts)
+
+
+DOCAI_CHUNK_SIZE = 15
+DOCAI_MAX_CONCURRENT = 10
+
+
+async def _process_document_docai(file_content: bytes, mime_type: str = "application/pdf") -> str:
+    """Process a document using Google Document AI with parallel chunking."""
+    reader = PdfReader(io.BytesIO(file_content))
+    total_pages = len(reader.pages)
+
+    if total_pages <= DOCAI_CHUNK_SIZE:
+        chunks = [file_content]
+    else:
+        chunks = []
+        for start in range(0, total_pages, DOCAI_CHUNK_SIZE):
+            writer = PdfWriter()
+            for page_num in range(start, min(start + DOCAI_CHUNK_SIZE, total_pages)):
+                writer.add_page(reader.pages[page_num])
+            buf = io.BytesIO()
+            writer.write(buf)
+            chunks.append(buf.getvalue())
+
+    if len(chunks) == 1:
+        return await asyncio.to_thread(_docai_process_single_chunk, chunks[0], mime_type, 0)
+
+    semaphore = asyncio.Semaphore(DOCAI_MAX_CONCURRENT)
+
+    async def process_with_limit(chunk: bytes, offset: int) -> str:
+        async with semaphore:
+            return await asyncio.to_thread(_docai_process_single_chunk, chunk, mime_type, offset)
+
+    tasks = [process_with_limit(c, i * DOCAI_CHUNK_SIZE) for i, c in enumerate(chunks)]
+    results = await asyncio.gather(*tasks)
+    return "\n\n".join(results)
 
 
 _workspace_client = None
@@ -520,6 +668,66 @@ async def check_status() -> str:
         )
     else:
         return "Databricks Document Parser MCP is running but no credentials are configured. Set DATABRICKS_HOST and DATABRICKS_TOKEN."
+
+
+@mcp.tool()
+async def compare_parsers(url: str) -> str:
+    """Parse a document with BOTH Databricks and Google Document AI, returning side-by-side output.
+
+    Use this to compare parsing quality between the two engines.
+    Requires both Databricks and Google DocAI credentials to be configured.
+
+    Args:
+        url: Direct URL to a PDF document
+    """
+    # Check both sets of credentials
+    if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
+        return "Error: Databricks credentials not configured. Set DATABRICKS_HOST and DATABRICKS_TOKEN."
+    if not GOOGLE_DOCAI_AVAILABLE:
+        return "Error: google-cloud-documentai not installed. Run: pip install google-cloud-documentai google-auth"
+    if not GOOGLE_DOCAI_CREDENTIALS_PATH:
+        return "Error: Google DocAI credentials not configured. Set GOOGLE_DOCAI_CREDENTIALS_PATH."
+
+    # Download the document
+    try:
+        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            file_content = resp.content
+    except Exception as e:
+        return f"Error downloading document: {e}"
+
+    mime_type = "application/pdf"
+    reader = PdfReader(io.BytesIO(file_content))
+    total_pages = len(reader.pages)
+
+    # Run both parsers in parallel
+    databricks_task = _process_document(file_content, mime_type)
+    docai_task = _process_document_docai(file_content, mime_type)
+
+    databricks_result, docai_result = await asyncio.gather(
+        databricks_task, docai_task, return_exceptions=True
+    )
+
+    # Format results
+    if isinstance(databricks_result, Exception):
+        databricks_result = f"(Error: {databricks_result})"
+    if isinstance(docai_result, Exception):
+        docai_result = f"(Error: {docai_result})"
+
+    separator = "=" * 80
+    return (
+        f"PARSER COMPARISON — {total_pages} pages\n"
+        f"Source: {url}\n"
+        f"{separator}\n\n"
+        f"### DATABRICKS ai_parse_document (v2.0)\n\n"
+        f"{databricks_result}\n\n"
+        f"{separator}\n\n"
+        f"### GOOGLE DOCUMENT AI (Layout Parser + Gemini)\n\n"
+        f"{docai_result}\n\n"
+        f"{separator}\n"
+        f"END OF COMPARISON"
+    )
 
 
 # --- Starlette app with SSE transport + HTTP endpoints ---
