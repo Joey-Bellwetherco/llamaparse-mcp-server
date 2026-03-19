@@ -224,21 +224,63 @@ def _process_single_chunk(file_content: bytes, mime_type: str, page_offset: int 
     result = client.process_document(request=request)
     document = result.document
 
-    output_parts = []
+    # Try page-level extraction first (works with OCR processor)
+    has_page_text = False
+    if document.text and document.pages:
+        for page in document.pages:
+            if _get_page_text(page, document.text).strip():
+                has_page_text = True
+                break
 
-    for i, page in enumerate(document.pages):
-        page_num = page_offset + (page.page_number if page.page_number else i + 1)
-        page_text = _get_page_text(page, document.text).strip()
+    if has_page_text:
+        # OCR-style extraction: pages with text anchors and tables
+        output_parts = []
+        for i, page in enumerate(document.pages):
+            page_num = page_offset + (page.page_number if page.page_number else i + 1)
+            page_text = _get_page_text(page, document.text).strip()
 
-        output_parts.append(f"[Page {page_num}]")
-        if page_text:
-            output_parts.append(page_text)
+            output_parts.append(f"[Page {page_num}]")
+            if page_text:
+                output_parts.append(page_text)
 
-        tables = _extract_tables_from_page(page, document.text)
-        for j, table_md in enumerate(tables):
-            output_parts.append(f"[Table {j+1} on page {page_num}]\n{table_md}")
+            tables = _extract_tables_from_page(page, document.text)
+            for j, table_md in enumerate(tables):
+                output_parts.append(f"[Table {j+1} on page {page_num}]\n{table_md}")
 
-    return "\n\n".join(output_parts)
+        return "\n\n".join(output_parts)
+
+    # Layout Parser extraction: use chunks grouped by page
+    if document.chunked_document and document.chunked_document.chunks:
+        pages: dict[int, list[str]] = {}
+        for chunk in document.chunked_document.chunks:
+            content = chunk.content.strip() if chunk.content else ""
+            if not content:
+                continue
+            # Determine which page this chunk belongs to
+            page_num = page_offset + 1  # default to first page
+            if chunk.page_span:
+                page_num = page_offset + (chunk.page_span[0].page_start + 1)
+            if page_num not in pages:
+                pages[page_num] = []
+            pages[page_num].append(content)
+
+        output_parts = []
+        for page_num in sorted(pages.keys()):
+            output_parts.append(f"[Page {page_num}]")
+            output_parts.append("\n\n".join(pages[page_num]))
+        return "\n\n".join(output_parts)
+
+    # Fallback: raw document text with page markers from document.text
+    if document.text:
+        output_parts = []
+        for i, page in enumerate(document.pages):
+            page_num = page_offset + (page.page_number if page.page_number else i + 1)
+            output_parts.append(f"[Page {page_num}]")
+        if output_parts:
+            output_parts.append(document.text)
+        return "\n\n".join(output_parts)
+
+    return ""
 
 
 async def _process_document(file_content: bytes, mime_type: str = "application/pdf") -> str:
