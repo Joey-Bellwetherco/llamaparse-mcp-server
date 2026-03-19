@@ -259,7 +259,9 @@ def _process_single_chunk(file_content: bytes, mime_type: str, page_offset: int 
             # Determine which page this chunk belongs to
             page_num = page_offset + 1  # default to first page
             if chunk.page_span:
-                page_num = page_offset + (chunk.page_span[0].page_start + 1)
+                ps = chunk.page_span[0]
+                start = ps.page_start if hasattr(ps, 'page_start') else (ps.get('page_start', 0) if isinstance(ps, dict) else 0)
+                page_num = page_offset + (start + 1)
             if page_num not in pages:
                 pages[page_num] = []
             pages[page_num].append(content)
