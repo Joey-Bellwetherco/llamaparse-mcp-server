@@ -992,6 +992,52 @@ async def get_result_endpoint(request: Request):
     return PlainTextResponse(_parsed_results[doc_id]["text"])
 
 
+async def docai_only_endpoint(request: Request):
+    """Parse with Google Document AI only — for comparison testing."""
+    if not GOOGLE_DOCAI_AVAILABLE or not GOOGLE_DOCAI_CREDENTIALS_PATH:
+        return JSONResponse({"error": "Google DocAI not configured"}, status_code=500)
+
+    form = await request.form()
+    upload = form.get("file")
+    if not upload:
+        return JSONResponse({"error": "No file"}, status_code=400)
+
+    file_bytes = await upload.read()
+    reference = await _extract_docai_reference(file_bytes)
+
+    output_parts = []
+    for page_num in sorted(reference.keys()):
+        output_parts.append(f"[Page {page_num}]")
+        output_parts.append(reference[page_num])
+
+    return JSONResponse({
+        "parser": "google-docai-only",
+        "pages": len(reference),
+        "chars": sum(len(v) for v in reference.values()),
+        "text": "\n\n".join(output_parts),
+    })
+
+
+async def databricks_only_endpoint(request: Request):
+    """Parse with Databricks ai_parse_document only (no proofreading) — for comparison."""
+    if not _has_databricks_creds:
+        return JSONResponse({"error": "Databricks not configured"}, status_code=500)
+
+    form = await request.form()
+    upload = form.get("file")
+    if not upload:
+        return JSONResponse({"error": "No file"}, status_code=400)
+
+    file_bytes = await upload.read()
+    result = await _process_document_databricks(file_bytes, "application/pdf")
+
+    return JSONResponse({
+        "parser": "databricks-only",
+        "chars": len(result),
+        "text": result,
+    })
+
+
 async def oauth_protected_resource(request):
     return JSONResponse({
         "resource": f"https://{request.headers.get('host', 'localhost')}",
@@ -1026,6 +1072,8 @@ app = Starlette(
         Route("/favicon.ico", favicon),
         Route("/health", health),
         Route("/parse", parse_endpoint, methods=["POST"]),
+        Route("/parse-docai", docai_only_endpoint, methods=["POST"]),
+        Route("/parse-databricks", databricks_only_endpoint, methods=["POST"]),
         Route("/upload/{token}", token_upload_endpoint, methods=["POST"]),
         Route("/result/{doc_id}", get_result_endpoint),
         Route("/sse", endpoint=handle_sse),
