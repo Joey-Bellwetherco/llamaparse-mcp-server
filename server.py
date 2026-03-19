@@ -160,8 +160,8 @@ def _get_warehouse_id() -> str:
     return _warehouse_id
 
 
-CHUNK_SIZE = 15  # Pages per parallel chunk
-MAX_CONCURRENT = 10  # Max parallel SQL statements
+CHUNK_SIZE = 1  # Pages per parallel chunk (1 = max parallelism)
+MAX_CONCURRENT = 15  # Max parallel SQL statements
 
 
 def _split_pdf(pdf_bytes: bytes) -> list[bytes]:
@@ -307,114 +307,141 @@ async def _parse_single_chunk(
                 pass
 
 
-MIN_CHARS_PER_PAGE = 50  # Below this, page is likely scanned/image-based
+def _extract_pymupdf_reference(pdf_bytes: bytes) -> dict[int, str]:
+    """Extract per-page native text from PDF using PyMuPDF as a reference.
 
-
-def _extract_with_pymupdf(pdf_bytes: bytes) -> tuple[str, list[int]]:
-    """Extract text from a PDF using PyMuPDF (instant, no LLM needed).
-
-    Returns (full_text, list_of_page_indices_that_need_ocr).
-    Pages with fewer than MIN_CHARS_PER_PAGE chars are flagged for OCR.
+    Returns dict of {page_num (1-indexed): raw_text}.
+    Only returns pages that have meaningful native text (>20 chars).
     """
     doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
-    output_parts = []
-    ocr_needed_pages = []
-
+    reference = {}
     for i, page in enumerate(doc):
         text = page.get_text("text").strip()
-
-        # Extract tables as markdown
-        tables = page.find_tables()
-        table_parts = []
-        for j, table in enumerate(tables):
-            df = table.to_pandas()
-            if not df.empty:
-                table_parts.append(f"[Table {j+1} on page {i+1}]\n{df.to_markdown(index=False)}")
-
-        if len(text) < MIN_CHARS_PER_PAGE and not table_parts:
-            ocr_needed_pages.append(i)
-            continue
-
-        output_parts.append(f"[Page {i + 1}]")
-        if text:
-            output_parts.append(text)
-        for tp in table_parts:
-            output_parts.append(tp)
-
+        if len(text) > 20:
+            reference[i + 1] = text
     doc.close()
-    return "\n\n".join(output_parts), ocr_needed_pages
+    return reference
 
 
-def _extract_pages_as_pdf(pdf_bytes: bytes, page_indices: list[int]) -> bytes:
-    """Extract specific pages from a PDF into a new PDF."""
-    reader = PdfReader(io.BytesIO(pdf_bytes))
-    writer = PdfWriter()
-    for idx in page_indices:
-        if idx < len(reader.pages):
-            writer.add_page(reader.pages[idx])
-    buf = io.BytesIO()
-    writer.write(buf)
-    return buf.getvalue()
+_PROOFREAD_SQL_TEMPLATE = """
+SELECT ai_query(
+    'databricks-meta-llama-3-3-70b-instruct',
+    'You are a document proofreader. Compare the PARSED OUTPUT against the REFERENCE TEXT (native PDF text extraction).
+
+Fix ONLY these specific issues in the parsed output:
+- Wrong characters (e.g. "0" vs "O", "1" vs "l", "rn" vs "m")
+- Wrong numbers or values that differ from the reference
+- Swapped or misaligned table columns
+- Missing text that appears in the reference but not the parsed output
+
+DO NOT:
+- Remove [Page N], [Table], [Figure:] markers — keep all structure
+- Add text that appears in neither source (reference may contain hidden/overlapping text — ignore those)
+- Change formatting or layout
+- Add commentary or explanations
+
+Return ONLY the corrected parsed output, nothing else.
+
+PARSED OUTPUT:
+{parsed_text}
+
+REFERENCE TEXT:
+{reference_text}',
+    failOnError => false
+).response
+"""
+
+
+async def _proofread_page(
+    w: WorkspaceClient,
+    warehouse_id: str,
+    page_num: int,
+    parsed_text: str,
+    reference_text: str,
+    semaphore: asyncio.Semaphore,
+) -> tuple[int, str]:
+    """Use ai_query to proofread a single page against PyMuPDF reference."""
+    async with semaphore:
+        # Truncate to avoid token limits (keep first 4000 chars each)
+        parsed_trunc = parsed_text[:4000].replace("'", "''")
+        ref_trunc = reference_text[:4000].replace("'", "''")
+
+        sql = _PROOFREAD_SQL_TEMPLATE.format(
+            parsed_text=parsed_trunc,
+            reference_text=ref_trunc,
+        )
+
+        response = await asyncio.to_thread(
+            w.statement_execution.execute_statement,
+            warehouse_id=warehouse_id,
+            statement=sql,
+            wait_timeout="50s",
+        )
+
+        while response.status.state in (StatementState.PENDING, StatementState.RUNNING):
+            await asyncio.sleep(2)
+            response = await asyncio.to_thread(
+                w.statement_execution.get_statement,
+                statement_id=response.statement_id,
+            )
+
+        if (response.status.state == StatementState.SUCCEEDED
+                and response.result.data_array
+                and response.result.data_array[0][0]):
+            return page_num, response.result.data_array[0][0]
+
+        # If proofreading fails, return original parsed text
+        return page_num, parsed_text
 
 
 async def _process_document(file_content: bytes, mime_type: str = "application/pdf") -> str:
-    """Hybrid document processing: PyMuPDF for native text, Databricks AI for scanned pages.
+    """Process a document with Databricks AI, proofread against PyMuPDF reference.
 
-    1. Try PyMuPDF first (instant, free, perfect for digital PDFs)
-    2. Any pages with too little text get sent to Databricks ai_parse_document
-    3. Results are merged with correct page numbering
+    1. Databricks ai_parse_document — primary parser (sees visual layout)
+    2. PyMuPDF — extracts native text as ground truth reference
+    3. ai_query — proofreads parsed output against reference, fixes character
+       errors, wrong values, and misaligned columns
     """
+    # Step 1: Always parse with Databricks (primary)
+    databricks_text = await _process_document_databricks(file_content, mime_type)
+
+    # Step 2: If PDF, extract PyMuPDF reference and proofread
     if mime_type != "application/pdf":
-        # Non-PDF files (images, docx, pptx) always go to Databricks
-        return await _process_document_databricks(file_content, mime_type)
+        return databricks_text
 
-    # Step 1: Try PyMuPDF extraction
-    pymupdf_text, ocr_pages = await asyncio.to_thread(_extract_with_pymupdf, file_content)
+    reference = await asyncio.to_thread(_extract_pymupdf_reference, file_content)
+    if not reference:
+        # No native text to proofread against (fully scanned doc)
+        return databricks_text
 
-    if not ocr_pages:
-        # All pages extracted successfully — no need for Databricks
-        return pymupdf_text or "(No content extracted from document)"
+    # Split Databricks output into per-page sections
+    page_sections = re.split(r'(?=\[Page \d+\])', databricks_text)
+    page_sections = [s for s in page_sections if s.strip()]
 
-    reader = PdfReader(io.BytesIO(file_content))
-    total_pages = len(reader.pages)
-
-    if len(ocr_pages) == total_pages:
-        # Entire document needs OCR — send everything to Databricks
-        return await _process_document_databricks(file_content, mime_type)
-
-    # Step 2: Send only the scanned pages to Databricks
-    ocr_pdf = await asyncio.to_thread(_extract_pages_as_pdf, file_content, ocr_pages)
-    databricks_text = await _process_document_databricks(ocr_pdf, mime_type)
-
-    # Step 3: Merge — re-number Databricks pages to match original positions
-    # Parse Databricks output into page chunks
-    db_sections = re.split(r'(?=\[Page \d+\])', databricks_text)
-    db_sections = [s for s in db_sections if s.strip()]
-
-    # Build a map of original_page_num -> text for Databricks results
-    db_page_map = {}
-    for idx, section in enumerate(db_sections):
-        if idx < len(ocr_pages):
-            original_page = ocr_pages[idx] + 1  # 0-indexed to 1-indexed
-            # Replace the page number with the correct original one
-            section = re.sub(r'\[Page \d+\]', f'[Page {original_page}]', section, count=1)
-            db_page_map[original_page] = section
-
-    # Parse PyMuPDF output into page chunks
-    mu_sections = re.split(r'(?=\[Page \d+\])', pymupdf_text)
-    mu_sections = [s for s in mu_sections if s.strip()]
-    mu_page_map = {}
-    for section in mu_sections:
+    page_map = {}
+    for section in page_sections:
         match = re.match(r'\[Page (\d+)\]', section)
         if match:
-            mu_page_map[int(match.group(1))] = section
+            page_map[int(match.group(1))] = section
 
-    # Merge all pages in order
-    all_pages = {}
-    all_pages.update(mu_page_map)
-    all_pages.update(db_page_map)
+    # Step 3: Proofread pages that have both parsed and reference text
+    w = _get_databricks_client()
+    warehouse_id = _get_warehouse_id()
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
-    combined = "\n\n".join(all_pages[p] for p in sorted(all_pages.keys()))
+    proofread_tasks = []
+    for page_num, parsed_section in page_map.items():
+        if page_num in reference:
+            proofread_tasks.append(
+                _proofread_page(w, warehouse_id, page_num, parsed_section, reference[page_num], semaphore)
+            )
+
+    if proofread_tasks:
+        results = await asyncio.gather(*proofread_tasks)
+        for page_num, corrected_text in results:
+            page_map[page_num] = corrected_text
+
+    combined = "\n\n".join(page_map[p] for p in sorted(page_map.keys()))
     return combined or "(No content extracted from document)"
 
 
