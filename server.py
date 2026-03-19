@@ -18,7 +18,15 @@ from mcp.server.sse import SseServerTransport
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.sql import StatementState
 from pypdf import PdfReader, PdfWriter
-import pymupdf
+
+# Google Document AI for proofreading reference
+import base64
+try:
+    from google.cloud import documentai_v1 as documentai
+    from google.oauth2 import service_account
+    GOOGLE_DOCAI_AVAILABLE = True
+except ImportError:
+    GOOGLE_DOCAI_AVAILABLE = False
 
 load_dotenv()
 
@@ -307,20 +315,112 @@ async def _parse_single_chunk(
                 pass
 
 
-def _extract_pymupdf_reference(pdf_bytes: bytes) -> dict[int, str]:
-    """Extract per-page native text from PDF using PyMuPDF as a reference.
+# Google Document AI config (for proofreading reference)
+GCP_PROJECT_ID = os.environ.get("GOOGLE_DOCAI_PROJECT_ID", "decoded-flag-490415-n5")
+GCP_LOCATION = os.environ.get("GOOGLE_DOCAI_LOCATION", "us")
+GCP_PROCESSOR_ID = os.environ.get("GOOGLE_DOCAI_PROCESSOR_ID", "8a96e920607e3974")
+GOOGLE_DOCAI_CREDENTIALS_PATH = os.environ.get("GOOGLE_DOCAI_CREDENTIALS_PATH", "")
 
-    Returns dict of {page_num (1-indexed): raw_text}.
-    Only returns pages that have meaningful native text (>20 chars).
+
+def _get_docai_client():
+    """Create a Document AI client with proper credentials."""
+    endpoint = f"{GCP_LOCATION}-documentai.googleapis.com"
+    if GOOGLE_DOCAI_CREDENTIALS_PATH:
+        decoded = base64.b64decode(GOOGLE_DOCAI_CREDENTIALS_PATH)
+        info = json.loads(decoded)
+        creds = service_account.Credentials.from_service_account_info(info)
+        return documentai.DocumentProcessorServiceClient(
+            credentials=creds,
+            client_options={"api_endpoint": endpoint},
+        )
+    return documentai.DocumentProcessorServiceClient(
+        client_options={"api_endpoint": endpoint},
+    )
+
+
+def _docai_extract_page_text(page, document_text: str) -> str:
+    """Extract text for a single page from Document AI response."""
+    if page.layout and page.layout.text_anchor and page.layout.text_anchor.text_segments:
+        parts = []
+        for segment in page.layout.text_anchor.text_segments:
+            start = int(segment.start_index) if segment.start_index else 0
+            end = int(segment.end_index)
+            parts.append(document_text[start:end])
+        return "".join(parts)
+    return ""
+
+
+def _docai_process_chunk(file_content: bytes, mime_type: str, page_offset: int = 0) -> dict[int, str]:
+    """Process a chunk with Document AI, return dict of {page_num: text}."""
+    client = _get_docai_client()
+    resource_name = client.processor_path(GCP_PROJECT_ID, GCP_LOCATION, GCP_PROCESSOR_ID)
+    raw_document = documentai.RawDocument(content=file_content, mime_type=mime_type)
+    process_options = documentai.ProcessOptions(
+        layout_config=documentai.ProcessOptions.LayoutConfig(
+            chunking_config=documentai.ProcessOptions.LayoutConfig.ChunkingConfig(
+                chunk_size=1000,
+                include_ancestor_headings=True,
+            ),
+        ),
+    )
+    request = documentai.ProcessRequest(
+        name=resource_name,
+        raw_document=raw_document,
+        process_options=process_options,
+    )
+    result = client.process_document(request=request)
+    document = result.document
+
+    pages = {}
+    for i, page in enumerate(document.pages):
+        page_num = page_offset + (page.page_number if page.page_number else i + 1)
+        text = _docai_extract_page_text(page, document.text).strip()
+        if text:
+            pages[page_num] = text
+    return pages
+
+
+DOCAI_CHUNK_SIZE = 15
+
+
+async def _extract_docai_reference(file_content: bytes) -> dict[int, str]:
+    """Extract per-page text using Google Document AI as a high-quality reference.
+
+    Returns dict of {page_num (1-indexed): text}.
+    Splits large PDFs into chunks for parallel processing.
     """
-    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
-    reference = {}
-    for i, page in enumerate(doc):
-        text = page.get_text("text").strip()
-        if len(text) > 20:
-            reference[i + 1] = text
-    doc.close()
-    return reference
+    if not GOOGLE_DOCAI_AVAILABLE or not GOOGLE_DOCAI_CREDENTIALS_PATH:
+        return {}
+
+    reader = PdfReader(io.BytesIO(file_content))
+    total_pages = len(reader.pages)
+
+    if total_pages <= DOCAI_CHUNK_SIZE:
+        return await asyncio.to_thread(_docai_process_chunk, file_content, "application/pdf", 0)
+
+    # Split into chunks and process in parallel
+    chunks = []
+    for start in range(0, total_pages, DOCAI_CHUNK_SIZE):
+        writer = PdfWriter()
+        for page_num in range(start, min(start + DOCAI_CHUNK_SIZE, total_pages)):
+            writer.add_page(reader.pages[page_num])
+        buf = io.BytesIO()
+        writer.write(buf)
+        chunks.append((buf.getvalue(), start))
+
+    semaphore = asyncio.Semaphore(10)
+
+    async def process_with_limit(chunk_bytes, offset):
+        async with semaphore:
+            return await asyncio.to_thread(_docai_process_chunk, chunk_bytes, "application/pdf", offset)
+
+    tasks = [process_with_limit(c, off) for c, off in chunks]
+    results = await asyncio.gather(*tasks)
+
+    merged = {}
+    for page_dict in results:
+        merged.update(page_dict)
+    return merged
 
 
 _PROOFREAD_SQL_TEMPLATE = """
@@ -398,21 +498,21 @@ async def _proofread_page(
 
 
 async def _process_document(file_content: bytes, mime_type: str = "application/pdf") -> str:
-    """Process a document with Databricks AI, proofread against PyMuPDF reference.
+    """Process a document with Databricks AI, proofread against Google Document AI reference.
 
-    1. Databricks ai_parse_document — primary parser (sees visual layout)
-    2. PyMuPDF — extracts native text as ground truth reference
-    3. ai_query — proofreads parsed output against reference, fixes character
-       errors, wrong values, and misaligned columns
+    1. Databricks ai_parse_document — primary parser (structured, visual)
+    2. Google Document AI — high-quality OCR reference (Layout Parser + Gemini)
+    3. ai_query — proofreads parsed output against reference, fixes errors
     """
-    # Step 1: Always parse with Databricks (primary)
-    databricks_text = await _process_document_databricks(file_content, mime_type)
+    # Step 1: Parse with Databricks (primary) and DocAI (reference) in parallel
+    if mime_type == "application/pdf" and GOOGLE_DOCAI_AVAILABLE and GOOGLE_DOCAI_CREDENTIALS_PATH:
+        databricks_task = _process_document_databricks(file_content, mime_type)
+        docai_task = _extract_docai_reference(file_content)
+        databricks_text, reference = await asyncio.gather(databricks_task, docai_task)
+    else:
+        databricks_text = await _process_document_databricks(file_content, mime_type)
+        reference = {}
 
-    # Step 2: If PDF, extract PyMuPDF reference and proofread
-    if mime_type != "application/pdf":
-        return databricks_text
-
-    reference = await asyncio.to_thread(_extract_pymupdf_reference, file_content)
     if not reference:
         # No native text to proofread against (fully scanned doc)
         return databricks_text
