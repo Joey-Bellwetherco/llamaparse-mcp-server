@@ -17,7 +17,7 @@ from starlette.responses import JSONResponse, PlainTextResponse, HTMLResponse, R
 from mcp.server.sse import SseServerTransport
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.sql import StatementState
-from pypdf import PdfReader
+from pypdf import PdfReader, PdfWriter
 
 load_dotenv()
 
@@ -146,13 +146,38 @@ def _get_warehouse_id() -> str:
     return _warehouse_id
 
 
-def _reconstruct_page_text(rows: list) -> str:
+CHUNK_SIZE = 15  # Pages per parallel chunk
+MAX_CONCURRENT = 10  # Max parallel SQL statements
+
+
+def _split_pdf(pdf_bytes: bytes) -> list[bytes]:
+    """Split a PDF into chunks of CHUNK_SIZE pages. Returns list of PDF bytes."""
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    total_pages = len(reader.pages)
+
+    if total_pages <= CHUNK_SIZE:
+        return [pdf_bytes]
+
+    chunks = []
+    for start in range(0, total_pages, CHUNK_SIZE):
+        writer = PdfWriter()
+        for page_num in range(start, min(start + CHUNK_SIZE, total_pages)):
+            writer.add_page(reader.pages[page_num])
+        buf = io.BytesIO()
+        writer.write(buf)
+        chunks.append(buf.getvalue())
+
+    return chunks
+
+
+def _reconstruct_page_text(rows: list, page_offset: int = 0) -> str:
     """Convert SQL result rows into text with [Page N] markers and markdown tables.
 
     rows: list of [page_idx, elem_idx, element_type, content]
+    page_offset: added to page_idx for correct numbering in chunked processing
     """
     if not rows:
-        return "(No content extracted from document)"
+        return ""
 
     pages: dict[int, dict] = {}
     for row in rows:
@@ -170,7 +195,7 @@ def _reconstruct_page_text(rows: list) -> str:
 
     output_parts = []
     for page_idx in sorted(pages.keys()):
-        page_num = page_idx + 1  # 0-indexed to 1-indexed
+        page_num = page_idx + 1 + page_offset
         output_parts.append(f"[Page {page_num}]")
         page_data = pages[page_idx]
         if page_data["text"]:
@@ -178,82 +203,91 @@ def _reconstruct_page_text(rows: list) -> str:
         for j, table_content in enumerate(page_data["tables"]):
             output_parts.append(f"[Table {j+1} on page {page_num}]\n{table_content}")
 
-    return "\n\n".join(output_parts) if output_parts else "(No content extracted from document)"
+    return "\n\n".join(output_parts)
+
+
+_PARSE_SQL_TEMPLATE = """
+WITH parsed AS (
+    SELECT ai_parse_document(content, map('version', '2.0')) AS doc
+    FROM read_files('{volume_path}', format => 'binaryFile')
+),
+pages AS (
+    SELECT posexplode(
+        variant_get(doc, '$.document.pages', 'ARRAY<VARIANT>')
+    ) AS (page_idx, page)
+    FROM parsed
+),
+elements AS (
+    SELECT page_idx,
+           posexplode(
+               variant_get(page, '$.elements', 'ARRAY<VARIANT>')
+           ) AS (elem_idx, element)
+    FROM pages
+)
+SELECT page_idx, elem_idx,
+       variant_get(element, '$.type', 'STRING') AS element_type,
+       variant_get(element, '$.content', 'STRING') AS content
+FROM elements
+ORDER BY page_idx, elem_idx
+"""
+
+
+async def _parse_single_chunk(
+    w: WorkspaceClient,
+    warehouse_id: str,
+    chunk_bytes: bytes,
+    page_offset: int,
+    semaphore: asyncio.Semaphore,
+) -> str:
+    """Upload one chunk to Volume, parse via SQL, return text with offset page numbers."""
+    temp_filename = f"{uuid.uuid4().hex[:12]}.pdf"
+    volume_path = f"{DATABRICKS_VOLUME_PATH}/{temp_filename}"
+
+    async with semaphore:
+        try:
+            await asyncio.to_thread(
+                w.files.upload,
+                file_path=volume_path,
+                contents=io.BytesIO(chunk_bytes),
+                overwrite=True,
+            )
+
+            sql = _PARSE_SQL_TEMPLATE.format(volume_path=volume_path)
+            response = await asyncio.to_thread(
+                w.statement_execution.execute_statement,
+                warehouse_id=warehouse_id,
+                statement=sql,
+                wait_timeout="300s",
+            )
+
+            if response.status.state != StatementState.SUCCEEDED:
+                error_msg = response.status.error.message if response.status.error else "Unknown SQL error"
+                return f"[Page {page_offset + 1}]\n(Error parsing chunk: {error_msg})"
+
+            return _reconstruct_page_text(response.result.data_array or [], page_offset)
+
+        finally:
+            try:
+                await asyncio.to_thread(w.files.delete, file_path=volume_path)
+            except Exception:
+                pass
 
 
 async def _process_document(file_content: bytes, mime_type: str = "application/pdf") -> str:
-    """Upload to Databricks Volume, parse via ai_parse_document, return text with [Page N] markers."""
+    """Process a document, splitting large PDFs into parallel chunks for speed."""
     w = _get_databricks_client()
     warehouse_id = _get_warehouse_id()
 
-    # Determine file extension from mime type
-    ext_map = {
-        "application/pdf": ".pdf",
-        "image/png": ".png",
-        "image/jpeg": ".jpg",
-        "image/tiff": ".tiff",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
-    }
-    ext = ext_map.get(mime_type, ".pdf")
-    temp_filename = f"{uuid.uuid4().hex[:12]}{ext}"
-    volume_path = f"{DATABRICKS_VOLUME_PATH}/{temp_filename}"
+    chunks = _split_pdf(file_content)
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
-    try:
-        # Step 1: Upload to Unity Catalog Volume
-        await asyncio.to_thread(
-            w.files.upload,
-            file_path=volume_path,
-            contents=io.BytesIO(file_content),
-            overwrite=True,
-        )
-
-        # Step 2: Execute ai_parse_document via SQL Statement Execution
-        sql = f"""
-        WITH parsed AS (
-            SELECT ai_parse_document(content, map('version', '2.0')) AS doc
-            FROM read_files('{volume_path}', format => 'binaryFile')
-        ),
-        pages AS (
-            SELECT posexplode(
-                variant_get(doc, '$.document.pages', 'ARRAY<VARIANT>')
-            ) AS (page_idx, page)
-            FROM parsed
-        ),
-        elements AS (
-            SELECT page_idx,
-                   posexplode(
-                       variant_get(page, '$.elements', 'ARRAY<VARIANT>')
-                   ) AS (elem_idx, element)
-            FROM pages
-        )
-        SELECT page_idx, elem_idx,
-               variant_get(element, '$.type', 'STRING') AS element_type,
-               variant_get(element, '$.content', 'STRING') AS content
-        FROM elements
-        ORDER BY page_idx, elem_idx
-        """
-
-        response = await asyncio.to_thread(
-            w.statement_execution.execute_statement,
-            warehouse_id=warehouse_id,
-            statement=sql,
-            wait_timeout="300s",
-        )
-
-        if response.status.state != StatementState.SUCCEEDED:
-            error_msg = response.status.error.message if response.status.error else "Unknown SQL error"
-            return f"Error parsing document: {error_msg}"
-
-        # Step 3: Reconstruct [Page N] markers from SQL result
-        return _reconstruct_page_text(response.result.data_array or [])
-
-    finally:
-        # Step 4: Cleanup temp file from Volume
-        try:
-            await asyncio.to_thread(w.files.delete, file_path=volume_path)
-        except Exception:
-            pass  # Best-effort cleanup
+    tasks = [
+        _parse_single_chunk(w, warehouse_id, chunk, i * CHUNK_SIZE, semaphore)
+        for i, chunk in enumerate(chunks)
+    ]
+    results = await asyncio.gather(*tasks)
+    combined = "\n\n".join(r for r in results if r)
+    return combined or "(No content extracted from document)"
 
 
 # --- Parsed result cache + upload tokens ---
