@@ -106,26 +106,39 @@ async function uploadFile(file) {
 
 # Databricks config
 DATABRICKS_HOST = os.environ.get("DATABRICKS_HOST", "")
-DATABRICKS_TOKEN = os.environ.get("DATABRICKS_TOKEN", "")
+DATABRICKS_TOKEN = os.environ.get("DATABRICKS_TOKEN", "")  # PAT (legacy)
+DATABRICKS_CLIENT_ID = os.environ.get("DATABRICKS_CLIENT_ID", "")  # OAuth SP
+DATABRICKS_CLIENT_SECRET = os.environ.get("DATABRICKS_CLIENT_SECRET", "")  # OAuth SP
 DATABRICKS_WAREHOUSE_ID = os.environ.get("DATABRICKS_WAREHOUSE_ID", "")
 DATABRICKS_VOLUME_PATH = os.environ.get(
     "DATABRICKS_VOLUME_PATH",
     "/Volumes/bellwether_dev/default/staging/tmp"
 )
 
+# Auth check — need either PAT or OAuth SP credentials
+_has_databricks_creds = bool(DATABRICKS_HOST and (
+    DATABRICKS_TOKEN or (DATABRICKS_CLIENT_ID and DATABRICKS_CLIENT_SECRET)
+))
 
 _workspace_client = None
 _warehouse_id = None
 
 
 def _get_databricks_client() -> WorkspaceClient:
-    """Create or return cached Databricks WorkspaceClient."""
+    """Create or return cached Databricks WorkspaceClient.
+
+    Supports both OAuth service principal (preferred) and PAT (legacy).
+    The SDK auto-detects auth method from the provided credentials.
+    """
     global _workspace_client
     if _workspace_client is None:
-        _workspace_client = WorkspaceClient(
-            host=DATABRICKS_HOST,
-            token=DATABRICKS_TOKEN,
-        )
+        kwargs = {"host": DATABRICKS_HOST}
+        if DATABRICKS_CLIENT_ID and DATABRICKS_CLIENT_SECRET:
+            kwargs["client_id"] = DATABRICKS_CLIENT_ID
+            kwargs["client_secret"] = DATABRICKS_CLIENT_SECRET
+        elif DATABRICKS_TOKEN:
+            kwargs["token"] = DATABRICKS_TOKEN
+        _workspace_client = WorkspaceClient(**kwargs)
     return _workspace_client
 
 
@@ -440,8 +453,8 @@ async def parse_document_from_url(
         url: Direct URL to a document file
         mime_type: MIME type of the document (default: application/pdf)
     """
-    if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
-        return "Error: No Databricks credentials configured. Set DATABRICKS_HOST and DATABRICKS_TOKEN."
+    if not _has_databricks_creds:
+        return "Error: No Databricks credentials configured. Set DATABRICKS_HOST + DATABRICKS_CLIENT_ID/CLIENT_SECRET (OAuth) or DATABRICKS_TOKEN (PAT)."
 
     try:
         async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
@@ -518,7 +531,7 @@ UPLOAD_URL = os.environ.get("PUBLIC_URL", "https://bw-parse-mcp-server.up.railwa
 @mcp.tool()
 async def check_status() -> str:
     """Check if the Databricks Document Parser MCP server is configured and ready."""
-    if DATABRICKS_HOST and DATABRICKS_TOKEN:
+    if _has_databricks_creds:
         warehouse_info = ""
         try:
             wid = _get_warehouse_id()
@@ -539,7 +552,7 @@ async def check_status() -> str:
             f"Supported formats: PDF, PNG, JPG, DOCX, PPTX"
         )
     else:
-        return "Databricks Document Parser MCP is running but no credentials are configured. Set DATABRICKS_HOST and DATABRICKS_TOKEN."
+        return "Databricks Document Parser MCP is running but no credentials are configured. Set DATABRICKS_HOST + DATABRICKS_CLIENT_ID/CLIENT_SECRET (OAuth) or DATABRICKS_TOKEN (PAT)."
 
 
 # --- Starlette app with SSE transport + HTTP endpoints ---
@@ -572,7 +585,7 @@ async def favicon(request):
 
 async def health(request):
     status = {"status": "ok"}
-    if DATABRICKS_HOST and DATABRICKS_TOKEN:
+    if _has_databricks_creds:
         try:
             w = _get_databricks_client()
             me = await asyncio.to_thread(w.current_user.me)
@@ -584,8 +597,8 @@ async def health(request):
 
 async def parse_endpoint(request: Request):
     """Upload + parse in one step. Returns a document_id for MCP tool retrieval."""
-    if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
-        return JSONResponse({"error": "No Databricks credentials configured"}, status_code=500)
+    if not _has_databricks_creds:
+        return JSONResponse({"error": "No Databricks credentials configured. Set DATABRICKS_HOST + DATABRICKS_CLIENT_ID/CLIENT_SECRET or DATABRICKS_TOKEN"}, status_code=500)
 
     content_type = request.headers.get("content-type", "")
 
@@ -662,8 +675,8 @@ async def token_upload_endpoint(request: Request):
     if time.time() - token_data["created"] > UPLOAD_TOKEN_TTL:
         return JSONResponse({"error": "Upload token expired. Request a new one."}, status_code=403)
 
-    if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
-        return JSONResponse({"error": "No Databricks credentials configured"}, status_code=500)
+    if not _has_databricks_creds:
+        return JSONResponse({"error": "No Databricks credentials configured. Set DATABRICKS_HOST + DATABRICKS_CLIENT_ID/CLIENT_SECRET or DATABRICKS_TOKEN"}, status_code=500)
 
     content_type = request.headers.get("content-type", "")
 
