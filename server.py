@@ -325,7 +325,7 @@ def _extract_pymupdf_reference(pdf_bytes: bytes) -> dict[int, str]:
 
 _PROOFREAD_SQL_TEMPLATE = """
 SELECT ai_query(
-    'databricks-meta-llama-3-3-70b-instruct',
+    'databricks-claude-sonnet-4-6',
     'You are a precision document correction engine. You have two inputs:
 
 PARSED OUTPUT — from an AI document parser. It has good structure and layout (headings, tables, figures) but may contain small errors from OCR/visual parsing.
@@ -384,9 +384,9 @@ async def _proofread_page(
 ) -> tuple[int, str]:
     """Use ai_query to proofread a single page against PyMuPDF reference."""
     async with semaphore:
-        # Truncate to avoid token limits (keep first 4000 chars each)
-        parsed_trunc = parsed_text[:4000].replace("'", "''")
-        ref_trunc = reference_text[:4000].replace("'", "''")
+        # Escape single quotes for SQL, keep full text (model handles up to ~16k tokens)
+        parsed_trunc = parsed_text[:12000].replace("'", "''")
+        ref_trunc = reference_text[:12000].replace("'", "''")
 
         sql = _PROOFREAD_SQL_TEMPLATE.format(
             parsed_text=parsed_trunc,
