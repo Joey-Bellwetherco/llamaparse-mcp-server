@@ -6,6 +6,3 @@ starlette>=0.36.0
 pypdf>=4.0.0
 python-multipart>=0.0.6
 databricks-sdk>=0.38.0
-# Optional — needed for compare_parsers tool
-google-cloud-documentai>=2.20.0
-google-auth>=2.20.0
