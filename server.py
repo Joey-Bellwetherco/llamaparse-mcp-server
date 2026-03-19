@@ -666,6 +666,111 @@ async def get_result_endpoint(request: Request):
     return PlainTextResponse(_parsed_results[doc_id]["text"])
 
 
+async def debug_parse_endpoint(request: Request):
+    """Upload a PDF and return the RAW Document AI response structure for page 1."""
+    if not GOOGLE_DOCAI_CREDENTIALS_PATH:
+        return JSONResponse({"error": "No credentials configured"}, status_code=500)
+
+    form = await request.form()
+    upload = form.get("file")
+    if not upload:
+        return JSONResponse({"error": "No file"}, status_code=400)
+
+    file_bytes = await upload.read()
+    page_num = int(request.query_params.get("page", "1"))
+
+    # Process just the requested page
+    reader = PdfReader(io.BytesIO(file_bytes))
+    if page_num > len(reader.pages):
+        return JSONResponse({"error": f"Page {page_num} doesn't exist (doc has {len(reader.pages)} pages)"}, status_code=400)
+
+    writer = PdfWriter()
+    writer.add_page(reader.pages[page_num - 1])
+    buf = io.BytesIO()
+    writer.write(buf)
+    single_page_bytes = buf.getvalue()
+
+    client = _get_docai_client()
+    resource_name = client.processor_path(GCP_PROJECT_ID, GCP_LOCATION, GCP_PROCESSOR_ID)
+    raw_document = documentai.RawDocument(content=single_page_bytes, mime_type="application/pdf")
+    process_options = documentai.ProcessOptions(
+        layout_config=documentai.ProcessOptions.LayoutConfig(
+            chunking_config=documentai.ProcessOptions.LayoutConfig.ChunkingConfig(
+                chunk_size=1000,
+                include_ancestor_headings=True,
+            ),
+        ),
+    )
+    request_obj = documentai.ProcessRequest(
+        name=resource_name,
+        raw_document=raw_document,
+        process_options=process_options,
+    )
+    result = await asyncio.to_thread(client.process_document, request=request_obj)
+    doc = result.document
+
+    # Build debug output
+    page_data = []
+    for i, page in enumerate(doc.pages):
+        p = {
+            "page_number": page.page_number,
+            "width": page.dimension.width if page.dimension else None,
+            "height": page.dimension.height if page.dimension else None,
+            "detected_languages": [
+                {"code": lang.language_code, "confidence": lang.confidence}
+                for lang in (page.detected_languages or [])
+            ],
+            "paragraphs": len(page.paragraphs) if page.paragraphs else 0,
+            "lines": len(page.lines) if page.lines else 0,
+            "tokens": len(page.tokens) if page.tokens else 0,
+            "tables": len(page.tables) if page.tables else 0,
+            "form_fields": len(page.form_fields) if page.form_fields else 0,
+            "visual_elements": len(page.visual_elements) if page.visual_elements else 0,
+            "blocks": len(page.blocks) if page.blocks else 0,
+        }
+
+        # Sample table structures
+        table_details = []
+        for t, table in enumerate(page.tables or []):
+            tbl = {
+                "header_rows": len(table.header_rows),
+                "body_rows": len(table.body_rows),
+                "header_cells": [],
+                "first_body_row_cells": [],
+            }
+            for row in table.header_rows[:1]:
+                for cell in row.cells:
+                    tbl["header_cells"].append(_get_text_from_layout(cell.layout, doc.text).strip()[:50])
+            for row in table.body_rows[:1]:
+                for cell in row.cells:
+                    tbl["first_body_row_cells"].append(_get_text_from_layout(cell.layout, doc.text).strip()[:50])
+            table_details.append(tbl)
+        p["table_details"] = table_details
+
+        page_data.append(p)
+
+    # Chunks from layout parser
+    chunks = []
+    for chunk in (doc.chunked_document.chunks if doc.chunked_document else []):
+        chunks.append({
+            "id": chunk.chunk_id,
+            "content": chunk.content[:500] if chunk.content else "",
+            "page_span": [
+                {"page": ps.page_start, "end": ps.page_end}
+                for ps in (chunk.page_span or [])
+            ],
+        })
+
+    return JSONResponse({
+        "requested_page": page_num,
+        "total_document_text_chars": len(doc.text),
+        "document_text_preview": doc.text[:2000],
+        "pages": page_data,
+        "chunks": chunks[:20],
+        "entities_count": len(doc.entities) if doc.entities else 0,
+    })
+
+
 async def oauth_protected_resource(request):
     return JSONResponse({
         "resource": f"https://{request.headers.get('host', 'localhost')}",
@@ -700,6 +805,7 @@ app = Starlette(
         Route("/favicon.ico", favicon),
         Route("/health", health),
         Route("/parse", parse_endpoint, methods=["POST"]),
+        Route("/debug-parse", debug_parse_endpoint, methods=["POST"]),
         Route("/upload/{token}", token_upload_endpoint, methods=["POST"]),
         Route("/result/{doc_id}", get_result_endpoint),
         Route("/sse", endpoint=handle_sse),
