@@ -658,6 +658,34 @@ async def token_upload_endpoint(request: Request):
     })
 
 
+async def debug_processor_endpoint(request: Request):
+    """Show processor info and available versions."""
+    if not GOOGLE_DOCAI_CREDENTIALS_PATH:
+        return JSONResponse({"error": "No credentials"}, status_code=500)
+    try:
+        client = _get_docai_client()
+        name = client.processor_path(GCP_PROJECT_ID, GCP_LOCATION, GCP_PROCESSOR_ID)
+        proc = await asyncio.to_thread(client.get_processor, name=name)
+        versions = await asyncio.to_thread(client.list_processor_versions, parent=name)
+        version_list = []
+        for v in versions:
+            version_list.append({
+                "display_name": v.display_name,
+                "id": v.name.split("/")[-1],
+                "state": str(v.state),
+                "model_type": str(v.model_type) if hasattr(v, 'model_type') else None,
+            })
+        return JSONResponse({
+            "processor_name": proc.display_name,
+            "type": proc.type_,
+            "default_version": proc.default_processor_version,
+            "state": str(proc.state),
+            "versions": version_list,
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 async def get_result_endpoint(request: Request):
     """Direct HTTP endpoint to retrieve parsed text (non-MCP access)."""
     doc_id = request.path_params.get("doc_id", "")
@@ -806,6 +834,7 @@ app = Starlette(
         Route("/health", health),
         Route("/parse", parse_endpoint, methods=["POST"]),
         Route("/debug-parse", debug_parse_endpoint, methods=["POST"]),
+        Route("/debug-processor", debug_processor_endpoint),
         Route("/upload/{token}", token_upload_endpoint, methods=["POST"]),
         Route("/result/{doc_id}", get_result_endpoint),
         Route("/sse", endpoint=handle_sse),
