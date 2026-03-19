@@ -838,6 +838,10 @@ async def health(request):
             status["databricks"] = {"user": me.user_name, "host": DATABRICKS_HOST}
         except Exception as e:
             status["databricks"] = {"error": str(e)}
+    status["docai_proofreading"] = {
+        "available": GOOGLE_DOCAI_AVAILABLE,
+        "configured": bool(GOOGLE_DOCAI_CREDENTIALS_PATH),
+    }
     return JSONResponse(status)
 
 
