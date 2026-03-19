@@ -329,7 +329,7 @@ def _reconstruct_page_text(rows: list, page_offset: int = 0) -> str:
 
     pages: dict[int, dict] = {}
     for row in rows:
-        page_idx = int(row[0])
+        page_idx = int(row[0]) if row[0] is not None else 0
         elem_type = (row[2] or "text").strip()
         content = (row[3] or "").strip()
         if not content:
@@ -359,22 +359,17 @@ WITH parsed AS (
     SELECT ai_parse_document(content, map('version', '2.0')) AS doc
     FROM read_files('{volume_path}', format => 'binaryFile')
 ),
-pages AS (
-    SELECT posexplode(
-        variant_get(doc, '$.document.pages', 'ARRAY<VARIANT>')
-    ) AS (page_idx, page)
-    FROM parsed
-),
 elements AS (
-    SELECT page_idx,
-           posexplode(
-               variant_get(page, '$.elements', 'ARRAY<VARIANT>')
-           ) AS (elem_idx, element)
-    FROM pages
+    SELECT posexplode(
+        variant_get(doc, '$.document.elements', 'ARRAY<VARIANT>')
+    ) AS (elem_idx, element)
+    FROM parsed
 )
-SELECT page_idx, elem_idx,
-       variant_get(element, '$.type', 'STRING') AS element_type,
-       variant_get(element, '$.content', 'STRING') AS content
+SELECT
+    variant_get(element, '$.bbox[0].page_id', 'INT') AS page_idx,
+    elem_idx,
+    variant_get(element, '$.type', 'STRING') AS element_type,
+    variant_get(element, '$.content', 'STRING') AS content
 FROM elements
 ORDER BY page_idx, elem_idx
 """
