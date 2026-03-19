@@ -447,7 +447,7 @@ async def _process_document(file_content: bytes, mime_type: str = "application/p
 
 
 # --- Parsed result cache + upload tokens ---
-_parsed_results: dict[str, dict] = {}  # id -> {"text": str, "pages": int, "filename": str}
+_parsed_results: dict[str, dict] = {}  # id -> {"text": str, "pages": int, "filename": str, "file_bytes": bytes}
 _content_hash_to_id: dict[str, str] = {}  # sha256 hash -> doc_id (for cache dedup)
 _upload_tokens: dict[str, dict] = {}   # token -> {"created": float, "filename": str}
 UPLOAD_TOKEN_TTL = 300  # 5 minutes
@@ -460,8 +460,8 @@ def _check_cache(file_bytes: bytes) -> str | None:
 
 
 def _store_result(doc_id: str, file_bytes: bytes, text: str, pages: int, filename: str):
-    """Store a parsed result and its content hash for dedup."""
-    _parsed_results[doc_id] = {"text": text, "pages": pages, "filename": filename}
+    """Store a parsed result, raw bytes, and content hash for dedup."""
+    _parsed_results[doc_id] = {"text": text, "pages": pages, "filename": filename, "file_bytes": file_bytes}
     content_hash = hashlib.sha256(file_bytes).hexdigest()
     _content_hash_to_id[content_hash] = doc_id
 
@@ -738,6 +738,96 @@ async def compare_parsers(url: str) -> str:
     )
 
 
+@mcp.tool()
+async def compare_parsers_by_id(document_id: str) -> str:
+    """Re-parse an already-uploaded document through BOTH Databricks and Google Document AI.
+
+    Use this after uploading a PDF via the upload page or get_upload_url flow.
+    The document_id is returned when you first upload/parse a file.
+
+    Args:
+        document_id: The document ID from a previous upload (e.g. "c20380b9")
+    """
+    if document_id not in _parsed_results:
+        return f"Error: Document '{document_id}' not found. Upload a file first via /parse or get_upload_url."
+
+    entry = _parsed_results[document_id]
+    file_bytes = entry.get("file_bytes")
+    if not file_bytes:
+        return f"Error: Raw file bytes not cached for document '{document_id}'. Re-upload the file."
+
+    if not GOOGLE_DOCAI_AVAILABLE:
+        return "Error: google-cloud-documentai not installed. Run: pip install google-cloud-documentai google-auth"
+    if not GOOGLE_DOCAI_CREDENTIALS_PATH:
+        return "Error: Google DocAI credentials not configured. Set GOOGLE_DOCAI_CREDENTIALS_PATH."
+
+    mime_type = "application/pdf"
+    databricks_result_text = entry["text"]  # Already parsed by Databricks
+
+    # Run Google DocAI on the cached bytes
+    try:
+        docai_result = await _process_document_docai(file_bytes, mime_type)
+    except Exception as e:
+        docai_result = f"(Error: {e})"
+
+    separator = "=" * 80
+    return (
+        f"PARSER COMPARISON — {entry['pages']} pages — {entry['filename']}\n"
+        f"Document ID: {document_id}\n"
+        f"{separator}\n\n"
+        f"### DATABRICKS ai_parse_document (v2.0)\n\n"
+        f"{databricks_result_text}\n\n"
+        f"{separator}\n\n"
+        f"### GOOGLE DOCUMENT AI (Layout Parser + Gemini)\n\n"
+        f"{docai_result}\n\n"
+        f"{separator}\n"
+        f"END OF COMPARISON"
+    )
+
+
+async def compare_upload_endpoint(request: Request):
+    """Upload a PDF and parse with both Databricks and Google DocAI."""
+    if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
+        return JSONResponse({"error": "Databricks credentials not configured"}, status_code=500)
+
+    content_type = request.headers.get("content-type", "")
+    if "multipart/form-data" not in content_type:
+        return JSONResponse({"error": "Expected multipart/form-data"}, status_code=400)
+
+    form = await request.form()
+    upload = form.get("file")
+    if not upload:
+        return JSONResponse({"error": "No file uploaded"}, status_code=400)
+
+    file_bytes = await upload.read()
+    filename = getattr(upload, "filename", "document.pdf") or "document.pdf"
+    mime_type = "application/pdf"
+
+    reader = PdfReader(io.BytesIO(file_bytes))
+    total_pages = len(reader.pages)
+
+    # Run both parsers in parallel
+    databricks_task = _process_document(file_bytes, mime_type)
+
+    docai_result = "(Google DocAI not available)"
+    if GOOGLE_DOCAI_AVAILABLE and GOOGLE_DOCAI_CREDENTIALS_PATH:
+        docai_task = _process_document_docai(file_bytes, mime_type)
+        results = await asyncio.gather(databricks_task, docai_task, return_exceptions=True)
+        databricks_result = results[0] if not isinstance(results[0], Exception) else f"(Error: {results[0]})"
+        docai_result = results[1] if not isinstance(results[1], Exception) else f"(Error: {results[1]})"
+    else:
+        databricks_result = await databricks_task
+        if isinstance(databricks_result, Exception):
+            databricks_result = f"(Error: {databricks_result})"
+
+    return JSONResponse({
+        "filename": filename,
+        "pages": total_pages,
+        "databricks": databricks_result,
+        "google_docai": docai_result,
+    })
+
+
 # --- Starlette app with SSE transport + HTTP endpoints ---
 
 sse = SseServerTransport("/messages/")
@@ -959,6 +1049,7 @@ app = Starlette(
         Route("/favicon.ico", favicon),
         Route("/health", health),
         Route("/parse", parse_endpoint, methods=["POST"]),
+        Route("/compare", compare_upload_endpoint, methods=["POST"]),
         Route("/upload/{token}", token_upload_endpoint, methods=["POST"]),
         Route("/result/{doc_id}", get_result_endpoint),
         Route("/sse", endpoint=handle_sse),
