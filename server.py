@@ -405,8 +405,16 @@ async def _parse_single_chunk(
                 w.statement_execution.execute_statement,
                 warehouse_id=warehouse_id,
                 statement=sql,
-                wait_timeout="300s",
+                wait_timeout="50s",
             )
+
+            # Poll if still running (warehouse cold-start or large chunk)
+            while response.status.state in (StatementState.PENDING, StatementState.RUNNING):
+                await asyncio.sleep(2)
+                response = await asyncio.to_thread(
+                    w.statement_execution.get_statement,
+                    statement_id=response.statement_id,
+                )
 
             if response.status.state != StatementState.SUCCEEDED:
                 error_msg = response.status.error.message if response.status.error else "Unknown SQL error"
