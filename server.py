@@ -1042,6 +1042,91 @@ async def register(request):
     })
 
 
+async def debug_parse_endpoint(request: Request):
+    """Upload a PDF and return the RAW ai_parse_document output for debugging."""
+    if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
+        return JSONResponse({"error": "No Databricks credentials"}, status_code=500)
+
+    content_type = request.headers.get("content-type", "")
+    if "multipart/form-data" not in content_type:
+        return JSONResponse({"error": "Expected multipart/form-data"}, status_code=400)
+
+    form = await request.form()
+    upload = form.get("file")
+    if not upload:
+        return JSONResponse({"error": "No file uploaded"}, status_code=400)
+
+    file_bytes = await upload.read()
+    w = _get_databricks_client()
+    warehouse_id = _get_warehouse_id()
+
+    temp_filename = f"debug_{uuid.uuid4().hex[:8]}.pdf"
+    volume_path = f"{DATABRICKS_VOLUME_PATH}/{temp_filename}"
+
+    try:
+        await asyncio.to_thread(
+            w.files.upload, file_path=volume_path,
+            contents=io.BytesIO(file_bytes), overwrite=True,
+        )
+
+        # Query 1: Raw variant output (first 5000 chars)
+        raw_sql = f"""
+        SELECT cast(ai_parse_document(content, map('version', '2.0')) AS STRING) AS raw_output
+        FROM read_files('{volume_path}', format => 'binaryFile')
+        """
+        raw_resp = await asyncio.to_thread(
+            w.statement_execution.execute_statement,
+            warehouse_id=warehouse_id, statement=raw_sql, wait_timeout="50s",
+        )
+        while raw_resp.status.state in (StatementState.PENDING, StatementState.RUNNING):
+            await asyncio.sleep(2)
+            raw_resp = await asyncio.to_thread(
+                w.statement_execution.get_statement, statement_id=raw_resp.statement_id,
+            )
+
+        raw_output = None
+        raw_error = None
+        if raw_resp.status.state == StatementState.SUCCEEDED and raw_resp.result.data_array:
+            raw_output = raw_resp.result.data_array[0][0][:10000] if raw_resp.result.data_array[0][0] else None
+        else:
+            raw_error = raw_resp.status.error.message if raw_resp.status.error else str(raw_resp.status.state)
+
+        # Query 2: Our normal extraction query
+        extract_sql = _PARSE_SQL_TEMPLATE.format(volume_path=volume_path)
+        ext_resp = await asyncio.to_thread(
+            w.statement_execution.execute_statement,
+            warehouse_id=warehouse_id, statement=extract_sql, wait_timeout="50s",
+        )
+        while ext_resp.status.state in (StatementState.PENDING, StatementState.RUNNING):
+            await asyncio.sleep(2)
+            ext_resp = await asyncio.to_thread(
+                w.statement_execution.get_statement, statement_id=ext_resp.statement_id,
+            )
+
+        extracted_rows = None
+        extract_error = None
+        if ext_resp.status.state == StatementState.SUCCEEDED:
+            extracted_rows = ext_resp.result.data_array[:50] if ext_resp.result.data_array else []
+        else:
+            extract_error = ext_resp.status.error.message if ext_resp.status.error else str(ext_resp.status.state)
+
+        return JSONResponse({
+            "volume_path": volume_path,
+            "file_size_bytes": len(file_bytes),
+            "raw_output": raw_output,
+            "raw_error": raw_error,
+            "extracted_rows": extracted_rows,
+            "extracted_row_count": len(extracted_rows) if extracted_rows else 0,
+            "extract_error": extract_error,
+        })
+
+    finally:
+        try:
+            await asyncio.to_thread(w.files.delete, file_path=volume_path)
+        except Exception:
+            pass
+
+
 app = Starlette(
     routes=[
         Route("/", homepage),
@@ -1050,6 +1135,7 @@ app = Starlette(
         Route("/health", health),
         Route("/parse", parse_endpoint, methods=["POST"]),
         Route("/compare", compare_upload_endpoint, methods=["POST"]),
+        Route("/debug-parse", debug_parse_endpoint, methods=["POST"]),
         Route("/upload/{token}", token_upload_endpoint, methods=["POST"]),
         Route("/result/{doc_id}", get_result_endpoint),
         Route("/sse", endpoint=handle_sse),
