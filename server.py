@@ -18,6 +18,7 @@ from mcp.server.sse import SseServerTransport
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.sql import StatementState
 from pypdf import PdfReader, PdfWriter
+import pymupdf
 
 load_dotenv()
 
@@ -306,12 +307,127 @@ async def _parse_single_chunk(
                 pass
 
 
+MIN_CHARS_PER_PAGE = 50  # Below this, page is likely scanned/image-based
+
+
+def _extract_with_pymupdf(pdf_bytes: bytes) -> tuple[str, list[int]]:
+    """Extract text from a PDF using PyMuPDF (instant, no LLM needed).
+
+    Returns (full_text, list_of_page_indices_that_need_ocr).
+    Pages with fewer than MIN_CHARS_PER_PAGE chars are flagged for OCR.
+    """
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    output_parts = []
+    ocr_needed_pages = []
+
+    for i, page in enumerate(doc):
+        text = page.get_text("text").strip()
+
+        # Extract tables as markdown
+        tables = page.find_tables()
+        table_parts = []
+        for j, table in enumerate(tables):
+            df = table.to_pandas()
+            if not df.empty:
+                table_parts.append(f"[Table {j+1} on page {i+1}]\n{df.to_markdown(index=False)}")
+
+        if len(text) < MIN_CHARS_PER_PAGE and not table_parts:
+            ocr_needed_pages.append(i)
+            continue
+
+        output_parts.append(f"[Page {i + 1}]")
+        if text:
+            output_parts.append(text)
+        for tp in table_parts:
+            output_parts.append(tp)
+
+    doc.close()
+    return "\n\n".join(output_parts), ocr_needed_pages
+
+
+def _extract_pages_as_pdf(pdf_bytes: bytes, page_indices: list[int]) -> bytes:
+    """Extract specific pages from a PDF into a new PDF."""
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    writer = PdfWriter()
+    for idx in page_indices:
+        if idx < len(reader.pages):
+            writer.add_page(reader.pages[idx])
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
 async def _process_document(file_content: bytes, mime_type: str = "application/pdf") -> str:
-    """Process a document, splitting large PDFs into parallel chunks for speed."""
+    """Hybrid document processing: PyMuPDF for native text, Databricks AI for scanned pages.
+
+    1. Try PyMuPDF first (instant, free, perfect for digital PDFs)
+    2. Any pages with too little text get sent to Databricks ai_parse_document
+    3. Results are merged with correct page numbering
+    """
+    if mime_type != "application/pdf":
+        # Non-PDF files (images, docx, pptx) always go to Databricks
+        return await _process_document_databricks(file_content, mime_type)
+
+    # Step 1: Try PyMuPDF extraction
+    pymupdf_text, ocr_pages = await asyncio.to_thread(_extract_with_pymupdf, file_content)
+
+    if not ocr_pages:
+        # All pages extracted successfully — no need for Databricks
+        return pymupdf_text or "(No content extracted from document)"
+
+    reader = PdfReader(io.BytesIO(file_content))
+    total_pages = len(reader.pages)
+
+    if len(ocr_pages) == total_pages:
+        # Entire document needs OCR — send everything to Databricks
+        return await _process_document_databricks(file_content, mime_type)
+
+    # Step 2: Send only the scanned pages to Databricks
+    ocr_pdf = await asyncio.to_thread(_extract_pages_as_pdf, file_content, ocr_pages)
+    databricks_text = await _process_document_databricks(ocr_pdf, mime_type)
+
+    # Step 3: Merge — re-number Databricks pages to match original positions
+    # Parse Databricks output into page chunks
+    db_sections = re.split(r'(?=\[Page \d+\])', databricks_text)
+    db_sections = [s for s in db_sections if s.strip()]
+
+    # Build a map of original_page_num -> text for Databricks results
+    db_page_map = {}
+    for idx, section in enumerate(db_sections):
+        if idx < len(ocr_pages):
+            original_page = ocr_pages[idx] + 1  # 0-indexed to 1-indexed
+            # Replace the page number with the correct original one
+            section = re.sub(r'\[Page \d+\]', f'[Page {original_page}]', section, count=1)
+            db_page_map[original_page] = section
+
+    # Parse PyMuPDF output into page chunks
+    mu_sections = re.split(r'(?=\[Page \d+\])', pymupdf_text)
+    mu_sections = [s for s in mu_sections if s.strip()]
+    mu_page_map = {}
+    for section in mu_sections:
+        match = re.match(r'\[Page (\d+)\]', section)
+        if match:
+            mu_page_map[int(match.group(1))] = section
+
+    # Merge all pages in order
+    all_pages = {}
+    all_pages.update(mu_page_map)
+    all_pages.update(db_page_map)
+
+    combined = "\n\n".join(all_pages[p] for p in sorted(all_pages.keys()))
+    return combined or "(No content extracted from document)"
+
+
+async def _process_document_databricks(file_content: bytes, mime_type: str = "application/pdf") -> str:
+    """Process a document via Databricks ai_parse_document with parallel chunking."""
     w = _get_databricks_client()
     warehouse_id = _get_warehouse_id()
 
-    chunks = _split_pdf(file_content)
+    if mime_type == "application/pdf":
+        chunks = _split_pdf(file_content)
+    else:
+        chunks = [file_content]
+
     semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
     tasks = [
