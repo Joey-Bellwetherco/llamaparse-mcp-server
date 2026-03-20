@@ -679,6 +679,36 @@ async def parse_endpoint(request: Request):
         # Allow parser override from form field too
         if form.get("parser"):
             parser = form["parser"]
+    elif "application/json" in content_type:
+        # ChatGPT Actions may send JSON with a URL or openaiFileIdRefs
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+        # If ChatGPT sent a URL in the JSON body, download it
+        url = body.get("url") or body.get("file_url") or body.get("document_url")
+        if url:
+            try:
+                async with httpx.AsyncClient(timeout=120, follow_redirects=True) as dl_client:
+                    resp = await dl_client.get(url)
+                    resp.raise_for_status()
+                    file_bytes = resp.content
+            except Exception as e:
+                return JSONResponse({"error": f"Failed to download file: {str(e)}"}, status_code=400)
+            filename = url.split("/")[-1].split("?")[0] or "document.pdf"
+            lower_url = url.lower().split("?")[0]
+            if lower_url.endswith(".png"):
+                mime_type = "image/png"
+            elif lower_url.endswith((".jpg", ".jpeg")):
+                mime_type = "image/jpeg"
+            else:
+                mime_type = "application/pdf"
+        else:
+            return JSONResponse({
+                "error": "JSON body received but no file URL found. Send file as multipart/form-data or provide a 'url' field in JSON."
+            }, status_code=400)
+        if body.get("parser"):
+            parser = body["parser"]
     else:
         file_bytes = await request.body()
         filename = request.headers.get("x-filename", "document.pdf")
