@@ -882,6 +882,32 @@ async def get_result_endpoint(request: Request):
     return PlainTextResponse(_parsed_results[doc_id]["text"])
 
 
+async def get_result_file_endpoint(request: Request):
+    """Return parsed text as a downloadable file via openaiFileResponse for ChatGPT."""
+    doc_id = request.path_params.get("doc_id", "")
+    if doc_id not in _parsed_results:
+        return JSONResponse({"error": f"No document with id '{doc_id}'"}, status_code=404)
+
+    entry = _parsed_results[doc_id]
+    text = entry["text"]
+    original_name = entry.get("filename", "document")
+    # Strip extension and add .md
+    base_name = original_name.rsplit(".", 1)[0] if "." in original_name else original_name
+    md_filename = f"{base_name}.md"
+
+    content_b64 = base64.b64encode(text.encode("utf-8")).decode("utf-8")
+
+    return JSONResponse({
+        "openaiFileResponse": [
+            {
+                "name": md_filename,
+                "mime_type": "text/markdown",
+                "content": content_b64,
+            }
+        ]
+    })
+
+
 async def debug_parse_endpoint(request: Request):
     """Upload a PDF and return the RAW Document AI response structure for page 1."""
     if not GOOGLE_DOCAI_CREDENTIALS_PATH:
@@ -1214,6 +1240,7 @@ app = Starlette(
         Route("/debug-processor", debug_processor_endpoint),
         Route("/upload/{token}", token_upload_endpoint, methods=["POST"]),
         Route("/result/{doc_id}", get_result_endpoint),
+        Route("/result-file/{doc_id}", get_result_file_endpoint),
         Route("/sse", endpoint=handle_sse),
         Mount("/messages/", app=sse.handle_post_message),
         Route("/.well-known/oauth-protected-resource", oauth_protected_resource),
