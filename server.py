@@ -54,12 +54,22 @@ UPLOAD_PAGE_HTML = """<!DOCTYPE html>
   .copy-btn:hover { background: #2563eb; }
   .instructions { color: #94a3b8; font-size: 0.85rem; margin-top: 0.75rem; line-height: 1.5; }
   .error { color: #f87171; margin-top: 1rem; }
+  .parser-toggle { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; }
+  .parser-toggle button { flex: 1; padding: 0.6rem; border: 2px solid #475569; border-radius: 8px;
+                           background: transparent; color: #94a3b8; cursor: pointer; font-size: 0.9rem;
+                           transition: all 0.2s; }
+  .parser-toggle button.active { border-color: #3b82f6; background: #1e293b; color: #e2e8f0; }
+  .parser-toggle button:hover { border-color: #3b82f6; }
 </style>
 </head>
 <body>
 <div class="container">
   <h1>Document AI Parser</h1>
-  <p class="sub">Upload a PDF or image to parse with Google Document AI OCR</p>
+  <p class="sub">Upload a PDF or image to parse and compare OCR engines</p>
+  <div class="parser-toggle">
+    <button id="btnMistral" class="active" onclick="setParser('mistral')">Mistral OCR</button>
+    <button id="btnGoogle" onclick="setParser('google')">Google Document AI</button>
+  </div>
   <div class="drop-zone" id="dropZone">
     <div class="icon">📄</div>
     <p>Drag & drop a file here, or click to browse</p>
@@ -71,6 +81,13 @@ UPLOAD_PAGE_HTML = """<!DOCTYPE html>
 const dropZone = document.getElementById('dropZone');
 const fileInput = document.getElementById('fileInput');
 const status = document.getElementById('status');
+let currentParser = 'mistral';
+
+function setParser(p) {
+  currentParser = p;
+  document.getElementById('btnGoogle').classList.toggle('active', p === 'google');
+  document.getElementById('btnMistral').classList.toggle('active', p === 'mistral');
+}
 
 dropZone.addEventListener('click', () => fileInput.click());
 dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
@@ -82,16 +99,18 @@ dropZone.addEventListener('drop', e => {
 fileInput.addEventListener('change', () => { if (fileInput.files.length) uploadFile(fileInput.files[0]); });
 
 async function uploadFile(file) {
-  status.innerHTML = '<p class="parsing">Parsing ' + file.name + '... (this may take a minute for large files)</p>';
+  const parserName = currentParser === 'mistral' ? 'Mistral OCR' : 'Google Document AI';
+  status.innerHTML = '<p class="parsing">Parsing ' + file.name + ' with ' + parserName + '...</p>';
   const form = new FormData();
   form.append('file', file);
   try {
-    const resp = await fetch('/parse', { method: 'POST', body: form });
+    const resp = await fetch('/parse?parser=' + currentParser, { method: 'POST', body: form });
     const data = await resp.json();
     if (data.error) { status.innerHTML = '<p class="error">Error: ' + data.error + '</p>'; return; }
+    const usedParser = data.parser || currentParser;
     status.innerHTML = `
       <div class="success">
-        <p>Parsed <strong>${data.filename}</strong> (${data.pages} pages, ${data.chars.toLocaleString()} chars)</p>
+        <p>Parsed <strong>${data.filename}</strong> via <strong>${usedParser}</strong> (${data.pages} pages, ${data.chars.toLocaleString()} chars)</p>
         <p style="margin-top:0.75rem">Document ID: <span class="doc-id">${data.document_id}</span>
           <button class="copy-btn" onclick="navigator.clipboard.writeText('${data.document_id}')">Copy</button></p>
         <p class="instructions">
@@ -112,6 +131,10 @@ GCP_PROCESSOR_ID = os.environ.get("GOOGLE_DOCAI_PROCESSOR_ID", "8a96e920607e3974
 
 # Service account credentials — base64-encoded JSON string
 GOOGLE_DOCAI_CREDENTIALS_PATH = os.environ.get("GOOGLE_DOCAI_CREDENTIALS_PATH", "")
+
+# Mistral OCR config
+MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY", "")
+MISTRAL_MODEL = os.environ.get("MISTRAL_MODEL", "mistral-ocr-latest")
 
 
 def _get_docai_client():
@@ -300,6 +323,66 @@ async def _process_document(file_content: bytes, mime_type: str = "application/p
     return "\n\n".join(results)
 
 
+# --- Mistral OCR processing ---
+
+def _get_mistral_client():
+    """Create a Mistral client."""
+    from mistralai.client import Mistral
+    return Mistral(api_key=MISTRAL_API_KEY)
+
+
+async def _process_document_mistral(file_bytes: bytes, mime_type: str = "application/pdf") -> str:
+    """Process a document using Mistral OCR. Supports up to 1000 pages / 50MB."""
+    from mistralai.client import models as mistral_models
+
+    client = _get_mistral_client()
+
+    # Step 1: Upload file to Mistral
+    filename = "document.pdf" if "pdf" in mime_type else "document.png"
+    uploaded = await asyncio.to_thread(
+        client.files.upload,
+        file=mistral_models.File(file_name=filename, content=file_bytes),
+        purpose="ocr",
+    )
+
+    # Step 2: Run OCR with full extraction settings
+    ocr_response = await asyncio.to_thread(
+        client.ocr.process,
+        model=MISTRAL_MODEL,
+        document=mistral_models.FileChunk(file_id=uploaded.id, type="file"),
+        table_format="html",
+        extract_header=True,
+        extract_footer=True,
+        include_image_base64=False,
+    )
+
+    # Step 3: Convert response to [Page N] format matching Google output
+    output_parts = []
+    for page in ocr_response.pages:
+        page_num = page.index + 1  # Mistral uses 0-indexed
+        parts = [f"[Page {page_num}]"]
+
+        if page.header:
+            parts.append(f"[Header]\n{page.header}")
+
+        # Inline table HTML into markdown (replace [tbl-X.html](tbl-X.html) placeholders)
+        md = page.markdown or ""
+        if page.tables:
+            for table in page.tables:
+                placeholder = f"[{table.id}]({table.id})"
+                md = md.replace(placeholder, f"\n{table.content}\n")
+
+        if md.strip():
+            parts.append(md)
+
+        if page.footer:
+            parts.append(f"[Footer]\n{page.footer}")
+
+        output_parts.append("\n\n".join(parts))
+
+    return "\n\n".join(output_parts)
+
+
 # --- Parsed result cache + upload tokens ---
 _parsed_results: dict[str, dict] = {}  # id -> {"text": str, "pages": int, "filename": str}
 _content_hash_to_id: dict[str, str] = {}  # sha256 hash -> doc_id (for cache dedup)
@@ -420,8 +503,9 @@ async def get_upload_url(
 async def parse_document_from_url(
     url: str,
     mime_type: str = "application/pdf",
+    parser: str = "mistral",
 ) -> str:
-    """Parse a document from a URL using Google Document AI with visual OCR.
+    """Parse a document from a URL using Mistral OCR or Google Document AI.
 
     Provide a URL to a document (PDF or image) and get back the parsed text content.
     For large documents, the result is cached — use get_parsed_result to retrieve pages.
@@ -429,8 +513,12 @@ async def parse_document_from_url(
     Args:
         url: Direct URL to a document file
         mime_type: MIME type of the document (default: application/pdf)
+        parser: Which parser to use: "mistral" (default) or "google"
     """
-    if not GOOGLE_DOCAI_CREDENTIALS_PATH:
+    if parser == "mistral":
+        if not MISTRAL_API_KEY:
+            return "Error: No Mistral API key configured. Set MISTRAL_API_KEY."
+    elif not GOOGLE_DOCAI_CREDENTIALS_PATH:
         return "Error: No Google Cloud credentials configured. Set GOOGLE_DOCAI_CREDENTIALS_PATH."
 
     try:
@@ -468,7 +556,10 @@ async def parse_document_from_url(
             )
 
     try:
-        result = await _process_document(file_bytes, mime_type)
+        if parser == "mistral":
+            result = await _process_document_mistral(file_bytes, mime_type)
+        else:
+            result = await _process_document(file_bytes, mime_type)
 
         # Count pages
         page_count = 0
@@ -482,15 +573,16 @@ async def parse_document_from_url(
             page_count = 1
 
         # Cache the result
+        parser_label = "mistral" if parser == "mistral" else "google"
         doc_id = str(uuid.uuid4())[:8]
         _store_result(doc_id, file_bytes, result, page_count, filename)
 
         # For small results return inline, for large ones return summary + ID
         if len(result) < 50000:
-            return f"[Parsed {filename}, {page_count} pages, id: {doc_id}]\n\n{result}"
+            return f"[Parsed {filename} via {parser_label}, {page_count} pages, id: {doc_id}]\n\n{result}"
         else:
             return (
-                f"[Parsed {filename}, {page_count} pages, {len(result)} chars]\n"
+                f"[Parsed {filename} via {parser_label}, {page_count} pages, {len(result)} chars]\n"
                 f"Result is large. Use get_parsed_result(document_id='{doc_id}') to retrieve "
                 f"page ranges. Example: get_parsed_result('{doc_id}', page_start=1, page_end=10)"
             )
@@ -507,19 +599,28 @@ async def check_status() -> str:
 
     Also returns the upload URL where users can upload PDFs for parsing.
     """
+    lines = ["Document AI MCP is running.\n"]
+
     if GOOGLE_DOCAI_CREDENTIALS_PATH:
-        return (
-            f"Document AI MCP is running and ready.\n\n"
-            f"IMPORTANT: To parse a PDF, NEVER base64-encode it. Instead:\n"
-            f"1. Call get_upload_url(filename) to get a one-time upload URL\n"
-            f"2. In code execution, run: curl -s -X POST \"<url>\" -F \"file=@/path/to/file.pdf\"\n"
-            f"3. Call get_parsed_result(document_id) with the ID from the curl response\n\n"
-            f"For URLs: call parse_document_from_url(url) directly.\n"
-            f"Manual upload: {UPLOAD_URL}\n\n"
-            f"Processor: Layout Parser with Gemini"
-        )
+        lines.append("Google Document AI: configured (Layout Parser with Gemini)")
     else:
-        return "Document AI MCP is running but no credentials are configured. Set GOOGLE_DOCAI_CREDENTIALS_PATH."
+        lines.append("Google Document AI: NOT configured (set GOOGLE_DOCAI_CREDENTIALS_PATH)")
+
+    if MISTRAL_API_KEY:
+        lines.append(f"Mistral OCR: configured (model: {MISTRAL_MODEL})")
+    else:
+        lines.append("Mistral OCR: NOT configured (set MISTRAL_API_KEY)")
+
+    lines.append(
+        f"\nTo parse a PDF, NEVER base64-encode it. Instead:\n"
+        f"1. Call get_upload_url(filename) to get a one-time upload URL\n"
+        f"2. In code execution, run: curl -s -X POST \"<url>\" -F \"file=@/path/to/file.pdf\"\n"
+        f"3. Call get_parsed_result(document_id) with the ID from the curl response\n\n"
+        f"For URLs: call parse_document_from_url(url, parser='google' or 'mistral') directly.\n"
+        f"Manual upload: {UPLOAD_URL}"
+    )
+
+    return "\n".join(lines)
 
 
 # --- Starlette app with SSE transport + HTTP endpoints ---
@@ -555,8 +656,14 @@ async def health(request):
 
 
 async def parse_endpoint(request: Request):
-    """Upload + parse in one step. Returns a document_id for MCP tool retrieval."""
-    if not GOOGLE_DOCAI_CREDENTIALS_PATH:
+    """Upload + parse in one step. Returns a document_id for MCP tool retrieval.
+    Pass ?parser=google to use Google Document AI instead of Mistral OCR."""
+    parser = request.query_params.get("parser", "mistral")
+
+    if parser == "mistral":
+        if not MISTRAL_API_KEY:
+            return JSONResponse({"error": "No Mistral API key configured"}, status_code=500)
+    elif not GOOGLE_DOCAI_CREDENTIALS_PATH:
         return JSONResponse({"error": "No credentials configured"}, status_code=500)
 
     content_type = request.headers.get("content-type", "")
@@ -569,6 +676,9 @@ async def parse_endpoint(request: Request):
         file_bytes = await file.read()
         filename = file.filename or "document.pdf"
         mime_type = file.content_type or "application/pdf"
+        # Allow parser override from form field too
+        if form.get("parser"):
+            parser = form["parser"]
     else:
         file_bytes = await request.body()
         filename = request.headers.get("x-filename", "document.pdf")
@@ -602,10 +712,14 @@ async def parse_endpoint(request: Request):
         page_count = 1
 
     try:
-        result = await _process_document(file_bytes, mime_type)
+        if parser == "mistral":
+            result = await _process_document_mistral(file_bytes, mime_type)
+        else:
+            result = await _process_document(file_bytes, mime_type)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
+    parser_label = "mistral" if parser == "mistral" else "google"
     doc_id = str(uuid.uuid4())[:8]
     _store_result(doc_id, file_bytes, result, page_count, filename)
 
@@ -614,8 +728,9 @@ async def parse_endpoint(request: Request):
         "filename": filename,
         "pages": page_count,
         "chars": len(result),
+        "parser": parser_label,
         "message": (
-            f"Parsed successfully. In Claude, use: "
+            f"Parsed successfully via {parser_label}. In Claude, use: "
             f"get_parsed_result(document_id='{doc_id}') to retrieve the text."
         ),
     })
@@ -624,6 +739,7 @@ async def parse_endpoint(request: Request):
 async def token_upload_endpoint(request: Request):
     """One-time token upload: accepts file, parses it, returns document_id."""
     token = request.path_params.get("token", "")
+    parser = request.query_params.get("parser", "mistral")
 
     if token not in _upload_tokens:
         return JSONResponse({"error": "Invalid or expired upload token"}, status_code=403)
@@ -634,7 +750,10 @@ async def token_upload_endpoint(request: Request):
     if time.time() - token_data["created"] > UPLOAD_TOKEN_TTL:
         return JSONResponse({"error": "Upload token expired. Request a new one."}, status_code=403)
 
-    if not GOOGLE_DOCAI_CREDENTIALS_PATH:
+    if parser == "mistral":
+        if not MISTRAL_API_KEY:
+            return JSONResponse({"error": "No Mistral API key configured"}, status_code=500)
+    elif not GOOGLE_DOCAI_CREDENTIALS_PATH:
         return JSONResponse({"error": "No credentials configured"}, status_code=500)
 
     content_type = request.headers.get("content-type", "")
@@ -678,7 +797,10 @@ async def token_upload_endpoint(request: Request):
         page_count = 1
 
     try:
-        result = await _process_document(file_bytes, mime_type)
+        if parser == "mistral":
+            result = await _process_document_mistral(file_bytes, mime_type)
+        else:
+            result = await _process_document(file_bytes, mime_type)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -690,6 +812,7 @@ async def token_upload_endpoint(request: Request):
         "filename": filename,
         "pages": page_count,
         "chars": len(result),
+        "parser": "mistral" if parser == "mistral" else "google",
     })
 
 
@@ -844,6 +967,91 @@ async def debug_parse_endpoint(request: Request):
     })
 
 
+async def parse_url_endpoint(request: Request):
+    """Parse a document from a URL. JSON body: {"url": "...", "parser": "mistral"|"google"}
+    Designed for ChatGPT Custom GPT Actions."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body. Expected: {\"url\": \"...\", \"parser\": \"mistral\"}"}, status_code=400)
+
+    url = body.get("url")
+    if not url:
+        return JSONResponse({"error": "Missing 'url' field"}, status_code=400)
+
+    parser = body.get("parser", "mistral")
+
+    if parser == "mistral":
+        if not MISTRAL_API_KEY:
+            return JSONResponse({"error": "No Mistral API key configured"}, status_code=500)
+    elif not GOOGLE_DOCAI_CREDENTIALS_PATH:
+        return JSONResponse({"error": "No Google credentials configured"}, status_code=500)
+
+    try:
+        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            file_bytes = resp.content
+    except Exception as e:
+        return JSONResponse({"error": f"Failed to download: {str(e)}"}, status_code=400)
+
+    # Auto-detect mime type
+    lower_url = url.lower().split("?")[0]
+    if lower_url.endswith(".png"):
+        mime_type = "image/png"
+    elif lower_url.endswith((".jpg", ".jpeg")):
+        mime_type = "image/jpeg"
+    elif lower_url.endswith(".tiff"):
+        mime_type = "image/tiff"
+    else:
+        mime_type = "application/pdf"
+
+    filename = url.split("/")[-1].split("?")[0] or "document.pdf"
+
+    # Cache check
+    cached_id = _check_cache(file_bytes)
+    if cached_id:
+        entry = _parsed_results[cached_id]
+        return JSONResponse({
+            "document_id": cached_id,
+            "filename": entry["filename"],
+            "pages": entry["pages"],
+            "chars": len(entry["text"]),
+            "parser": parser,
+            "cached": True,
+        })
+
+    # Count pages
+    page_count = 0
+    if mime_type == "application/pdf":
+        try:
+            reader = PdfReader(io.BytesIO(file_bytes))
+            page_count = len(reader.pages)
+        except Exception:
+            page_count = 1
+    else:
+        page_count = 1
+
+    try:
+        if parser == "mistral":
+            result = await _process_document_mistral(file_bytes, mime_type)
+        else:
+            result = await _process_document(file_bytes, mime_type)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+    doc_id = str(uuid.uuid4())[:8]
+    _store_result(doc_id, file_bytes, result, page_count, filename)
+
+    return JSONResponse({
+        "document_id": doc_id,
+        "filename": filename,
+        "pages": page_count,
+        "chars": len(result),
+        "parser": parser,
+    })
+
+
 async def oauth_protected_resource(request):
     return JSONResponse({
         "resource": f"https://{request.headers.get('host', 'localhost')}",
@@ -878,6 +1086,7 @@ app = Starlette(
         Route("/favicon.ico", favicon),
         Route("/health", health),
         Route("/parse", parse_endpoint, methods=["POST"]),
+        Route("/parse-url", parse_url_endpoint, methods=["POST"]),
         Route("/debug-parse", debug_parse_endpoint, methods=["POST"]),
         Route("/debug-processor", debug_processor_endpoint),
         Route("/upload/{token}", token_upload_endpoint, methods=["POST"]),
