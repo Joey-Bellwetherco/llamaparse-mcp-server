@@ -132,7 +132,7 @@ def _get_docai_client():
 
 
 CHUNK_SIZE = 1  # Send 1 page at a time — guarantees correct page numbering
-MAX_CONCURRENT = 15  # Max parallel requests to Document AI
+MAX_CONCURRENT = 175  # Max parallel requests to Document AI
 
 
 def _split_pdf(pdf_bytes: bytes) -> list[bytes]:
