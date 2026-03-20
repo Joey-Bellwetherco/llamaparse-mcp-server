@@ -259,14 +259,51 @@ def _process_single_chunk(file_content: bytes, mime_type: str, page_offset: int 
             # Determine which page this chunk belongs to
             page_num = page_offset + 1  # default to first page
             try:
-                if hasattr(chunk, 'page_span') and chunk.page_span:
-                    ps = list(chunk.page_span)[0] if not isinstance(chunk.page_span, list) else chunk.page_span[0]
-                    page_num = page_offset + (getattr(ps, 'page_start', 0) + 1)
+                page_headers = getattr(chunk, 'page_headers', None)
+                page_footers = getattr(chunk, 'page_footers', None)
+                source_blocks = getattr(chunk, 'source_block_ids', None)
+
+                # Method 1: page_span (protobuf repeated field)
+                page_span = getattr(chunk, 'page_span', None)
+                if page_span:
+                    for ps in page_span:
+                        start = getattr(ps, 'page_start', None)
+                        if start is not None:
+                            page_num = page_offset + (start + 1)
+                            break
+
+                # Method 2: chunk_id often encodes page info (e.g. "c3" = chunk on page range)
+                if page_num == page_offset + 1 and hasattr(chunk, 'chunk_id'):
+                    cid = chunk.chunk_id or ""
+                    # Some Layout Parser versions use page_header/footer references
+                    if page_headers:
+                        for ph in page_headers:
+                            pg = getattr(ph, 'page_span', None)
+                            if pg:
+                                for ps in pg:
+                                    start = getattr(ps, 'page_start', None)
+                                    if start is not None:
+                                        page_num = page_offset + (start + 1)
+                                        break
+
             except Exception:
                 pass
             if page_num not in pages:
                 pages[page_num] = []
             pages[page_num].append(content)
+
+        # If all chunks ended up on page 1, try to split by page count
+        if len(pages) == 1 and document.pages and len(document.pages) > 1:
+            # Distribute chunks across pages based on document page count
+            all_chunks = list(pages.values())[0]
+            total_pages_count = len(document.pages)
+            chunks_per_page = max(1, len(all_chunks) // total_pages_count)
+            pages = {}
+            for idx, chunk_content in enumerate(all_chunks):
+                pg = page_offset + min(idx // chunks_per_page + 1, total_pages_count)
+                if pg not in pages:
+                    pages[pg] = []
+                pages[pg].append(chunk_content)
 
         output_parts = []
         for page_num in sorted(pages.keys()):
@@ -823,17 +860,27 @@ async def debug_parse_endpoint(request: Request):
 
         page_data.append(p)
 
-    # Chunks from layout parser
+    # Chunks from layout parser — dump all available fields
     chunks = []
     for chunk in (doc.chunked_document.chunks if doc.chunked_document else []):
-        chunks.append({
+        c = {
             "id": chunk.chunk_id,
-            "content": chunk.content[:500] if chunk.content else "",
-            "page_span": [
-                {"page": ps.page_start, "end": ps.page_end}
-                for ps in (chunk.page_span or [])
-            ],
-        })
+            "content_preview": (chunk.content or "")[:200],
+            "content_len": len(chunk.content) if chunk.content else 0,
+            "all_fields": [f for f in dir(chunk) if not f.startswith('_')],
+        }
+        # Try all possible page-related fields
+        for attr in ['page_span', 'page_headers', 'page_footers', 'source_block_ids']:
+            val = getattr(chunk, attr, None)
+            if val:
+                try:
+                    items = list(val)
+                    c[attr] = [str(item)[:200] for item in items[:3]]
+                except Exception as e:
+                    c[attr] = f"error: {e}"
+            else:
+                c[attr] = None
+        chunks.append(c)
 
     return JSONResponse({
         "requested_page": page_num,
