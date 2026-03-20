@@ -250,44 +250,58 @@ def _process_single_chunk(file_content: bytes, mime_type: str, page_offset: int 
         return "\n\n".join(output_parts)
 
     # Layout Parser extraction: use chunks grouped by page
+    # Map chunks to pages by matching chunk content against page text spans
     if document.chunked_document and document.chunked_document.chunks:
+        # Build page text ranges from document.pages using text anchors
+        page_ranges = []  # list of (page_num, start_offset, end_offset)
+        for i, page in enumerate(document.pages):
+            pg_num = page_offset + (page.page_number if page.page_number else i + 1)
+            if page.layout and page.layout.text_anchor and page.layout.text_anchor.text_segments:
+                for seg in page.layout.text_anchor.text_segments:
+                    start = int(seg.start_index) if seg.start_index else 0
+                    end = int(seg.end_index)
+                    page_ranges.append((pg_num, start, end))
+
+        def _find_page_for_chunk(chunk_content: str) -> int:
+            """Find which page a chunk belongs to by matching content in document.text."""
+            if not document.text or not page_ranges:
+                return page_offset + 1
+            # Find first occurrence of chunk's first 80 chars in document.text
+            needle = chunk_content[:80].strip()
+            if not needle:
+                return page_offset + 1
+            pos = document.text.find(needle)
+            if pos < 0:
+                # Try shorter match
+                needle = chunk_content[:40].strip()
+                pos = document.text.find(needle)
+            if pos >= 0:
+                for pg_num, start, end in page_ranges:
+                    if start <= pos < end:
+                        return pg_num
+            return page_offset + 1
+
         pages: dict[int, list[str]] = {}
         for chunk in document.chunked_document.chunks:
             content = chunk.content.strip() if chunk.content else ""
             if not content:
                 continue
-            # Determine which page this chunk belongs to
-            # page_span values are absolute (relative to full document), not chunk-relative
-            page_num = page_offset + 1  # default to first page
+
+            page_num = page_offset + 1
             try:
-                # Method 1: chunk.page_span (single ChunkPageSpan object)
+                # Method 1: chunk.page_span
                 ps = getattr(chunk, 'page_span', None)
                 if ps:
                     start = getattr(ps, 'page_start', None)
                     if start is not None:
-                        page_num = start + 1  # 0-indexed to 1-indexed, no offset needed
-
-                # Method 2: page_footers contain page_span
-                if page_num == page_offset + 1:
-                    for footer in (getattr(chunk, 'page_footers', None) or []):
-                        fps = getattr(footer, 'page_span', None)
-                        if fps:
-                            start = getattr(fps, 'page_start', None)
-                            if start is not None:
-                                page_num = start + 1
-                                break
-
-                # Method 3: page_headers contain page_span
-                if page_num == page_offset + 1:
-                    for header in (getattr(chunk, 'page_headers', None) or []):
-                        hps = getattr(header, 'page_span', None)
-                        if hps:
-                            start = getattr(hps, 'page_start', None)
-                            if start is not None:
-                                page_num = start + 1
-                                break
+                        page_num = page_offset + (start + 1)
             except Exception:
                 pass
+
+            # Method 2: match chunk content against page text ranges
+            if page_num == page_offset + 1 and page_ranges:
+                page_num = _find_page_for_chunk(content)
+
             if page_num not in pages:
                 pages[page_num] = []
             pages[page_num].append(content)
