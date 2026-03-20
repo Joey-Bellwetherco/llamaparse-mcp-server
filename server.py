@@ -259,51 +259,35 @@ def _process_single_chunk(file_content: bytes, mime_type: str, page_offset: int 
             # Determine which page this chunk belongs to
             page_num = page_offset + 1  # default to first page
             try:
-                page_headers = getattr(chunk, 'page_headers', None)
-                page_footers = getattr(chunk, 'page_footers', None)
-                source_blocks = getattr(chunk, 'source_block_ids', None)
+                # page_span is a single ChunkPageSpan object, not a list
+                ps = getattr(chunk, 'page_span', None)
+                if ps:
+                    start = getattr(ps, 'page_start', None)
+                    if start is not None:
+                        page_num = page_offset + (start + 1)
 
-                # Method 1: page_span (protobuf repeated field)
-                page_span = getattr(chunk, 'page_span', None)
-                if page_span:
-                    for ps in page_span:
-                        start = getattr(ps, 'page_start', None)
-                        if start is not None:
-                            page_num = page_offset + (start + 1)
-                            break
-
-                # Method 2: chunk_id often encodes page info (e.g. "c3" = chunk on page range)
-                if page_num == page_offset + 1 and hasattr(chunk, 'chunk_id'):
-                    cid = chunk.chunk_id or ""
-                    # Some Layout Parser versions use page_header/footer references
-                    if page_headers:
-                        for ph in page_headers:
-                            pg = getattr(ph, 'page_span', None)
-                            if pg:
-                                for ps in pg:
-                                    start = getattr(ps, 'page_start', None)
-                                    if start is not None:
-                                        page_num = page_offset + (start + 1)
-                                        break
-
+                # Fallback: check page_headers and page_footers for page info
+                if page_num == page_offset + 1:
+                    for footer in (getattr(chunk, 'page_footers', None) or []):
+                        fps = getattr(footer, 'page_span', None)
+                        if fps:
+                            start = getattr(fps, 'page_start', None)
+                            if start is not None:
+                                page_num = page_offset + (start + 1)
+                                break
+                if page_num == page_offset + 1:
+                    for header in (getattr(chunk, 'page_headers', None) or []):
+                        hps = getattr(header, 'page_span', None)
+                        if hps:
+                            start = getattr(hps, 'page_start', None)
+                            if start is not None:
+                                page_num = page_offset + (start + 1)
+                                break
             except Exception:
                 pass
             if page_num not in pages:
                 pages[page_num] = []
             pages[page_num].append(content)
-
-        # If all chunks ended up on page 1, try to split by page count
-        if len(pages) == 1 and document.pages and len(document.pages) > 1:
-            # Distribute chunks across pages based on document page count
-            all_chunks = list(pages.values())[0]
-            total_pages_count = len(document.pages)
-            chunks_per_page = max(1, len(all_chunks) // total_pages_count)
-            pages = {}
-            for idx, chunk_content in enumerate(all_chunks):
-                pg = page_offset + min(idx // chunks_per_page + 1, total_pages_count)
-                if pg not in pages:
-                    pages[pg] = []
-                pages[pg].append(chunk_content)
 
         output_parts = []
         for page_num in sorted(pages.keys()):
