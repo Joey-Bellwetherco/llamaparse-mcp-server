@@ -257,31 +257,34 @@ def _process_single_chunk(file_content: bytes, mime_type: str, page_offset: int 
             if not content:
                 continue
             # Determine which page this chunk belongs to
+            # page_span values are absolute (relative to full document), not chunk-relative
             page_num = page_offset + 1  # default to first page
             try:
-                # page_span is a single ChunkPageSpan object, not a list
+                # Method 1: chunk.page_span (single ChunkPageSpan object)
                 ps = getattr(chunk, 'page_span', None)
                 if ps:
                     start = getattr(ps, 'page_start', None)
                     if start is not None:
-                        page_num = page_offset + (start + 1)
+                        page_num = start + 1  # 0-indexed to 1-indexed, no offset needed
 
-                # Fallback: check page_headers and page_footers for page info
+                # Method 2: page_footers contain page_span
                 if page_num == page_offset + 1:
                     for footer in (getattr(chunk, 'page_footers', None) or []):
                         fps = getattr(footer, 'page_span', None)
                         if fps:
                             start = getattr(fps, 'page_start', None)
                             if start is not None:
-                                page_num = page_offset + (start + 1)
+                                page_num = start + 1
                                 break
+
+                # Method 3: page_headers contain page_span
                 if page_num == page_offset + 1:
                     for header in (getattr(chunk, 'page_headers', None) or []):
                         hps = getattr(header, 'page_span', None)
                         if hps:
                             start = getattr(hps, 'page_start', None)
                             if start is not None:
-                                page_num = page_offset + (start + 1)
+                                page_num = start + 1
                                 break
             except Exception:
                 pass
