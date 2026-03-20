@@ -997,6 +997,98 @@ async def debug_parse_endpoint(request: Request):
     })
 
 
+async def parse_chatgpt_endpoint(request: Request):
+    """Parse a document uploaded via ChatGPT Actions using openaiFileIdRefs.
+    ChatGPT sends: {"openaiFileIdRefs": [{"name": "...", "download_link": "...", "mime_type": "..."}]}"""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+    parser = body.get("parser", "mistral")
+    file_refs = body.get("openaiFileIdRefs", [])
+
+    if not file_refs:
+        return JSONResponse({"error": "No files provided. Upload a PDF and try again."}, status_code=400)
+
+    ref = file_refs[0]
+    # openaiFileIdRefs items are objects with name, id, mime_type, download_link
+    if isinstance(ref, dict):
+        download_url = ref.get("download_link") or ref.get("url")
+        filename = ref.get("name", "document.pdf")
+        mime_type = ref.get("mime_type", "application/pdf")
+    elif isinstance(ref, str):
+        download_url = ref
+        filename = "document.pdf"
+        mime_type = "application/pdf"
+    else:
+        return JSONResponse({"error": f"Unexpected file reference format: {type(ref)}"}, status_code=400)
+
+    if not download_url:
+        return JSONResponse({
+            "error": "No download link in file reference. File reference received: " + json.dumps(ref, default=str)[:500]
+        }, status_code=400)
+
+    if parser == "mistral" and not MISTRAL_API_KEY:
+        return JSONResponse({"error": "No Mistral API key configured"}, status_code=500)
+    if parser == "google" and not GOOGLE_DOCAI_CREDENTIALS_PATH:
+        return JSONResponse({"error": "No Google credentials configured"}, status_code=500)
+
+    try:
+        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as dl_client:
+            resp = await dl_client.get(download_url)
+            resp.raise_for_status()
+            file_bytes = resp.content
+    except Exception as e:
+        return JSONResponse({"error": f"Failed to download file from ChatGPT: {str(e)}"}, status_code=400)
+
+    if not file_bytes:
+        return JSONResponse({"error": "Downloaded file was empty"}, status_code=400)
+
+    # Cache check
+    cached_id = _check_cache(file_bytes)
+    if cached_id:
+        entry = _parsed_results[cached_id]
+        return JSONResponse({
+            "document_id": cached_id,
+            "filename": entry["filename"],
+            "pages": entry["pages"],
+            "chars": len(entry["text"]),
+            "parser": parser,
+            "cached": True,
+        })
+
+    # Count pages
+    page_count = 0
+    if mime_type == "application/pdf" or filename.lower().endswith(".pdf"):
+        try:
+            reader = PdfReader(io.BytesIO(file_bytes))
+            page_count = len(reader.pages)
+        except Exception:
+            page_count = 1
+    else:
+        page_count = 1
+
+    try:
+        if parser == "mistral":
+            result = await _process_document_mistral(file_bytes, mime_type)
+        else:
+            result = await _process_document(file_bytes, mime_type)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+    doc_id = str(uuid.uuid4())[:8]
+    _store_result(doc_id, file_bytes, result, page_count, filename)
+
+    return JSONResponse({
+        "document_id": doc_id,
+        "filename": filename,
+        "pages": page_count,
+        "chars": len(result),
+        "parser": parser,
+    })
+
+
 async def parse_url_endpoint(request: Request):
     """Parse a document from a URL. JSON body: {"url": "...", "parser": "mistral"|"google"}
     Designed for ChatGPT Custom GPT Actions."""
@@ -1117,6 +1209,7 @@ app = Starlette(
         Route("/health", health),
         Route("/parse", parse_endpoint, methods=["POST"]),
         Route("/parse-url", parse_url_endpoint, methods=["POST"]),
+        Route("/parse-chatgpt", parse_chatgpt_endpoint, methods=["POST"]),
         Route("/debug-parse", debug_parse_endpoint, methods=["POST"]),
         Route("/debug-processor", debug_processor_endpoint),
         Route("/upload/{token}", token_upload_endpoint, methods=["POST"]),
