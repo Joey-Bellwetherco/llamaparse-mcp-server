@@ -335,7 +335,7 @@ def _get_mistral_client():
 class _ImageAnnotation(BaseModel):
     """Schema for Mistral bbox annotation — describes each extracted image."""
     image_type: str = Field(..., description="Type of image: chart, table, logo, photo, diagram, figure, signature, or other")
-    description: str = Field(..., description="Brief description of what the image shows")
+    description: str = Field(..., description="Extract ALL visible text, numbers, labels, and values from the image. For charts and infographics, list every metric with its exact value. Be comprehensive — do not summarize or abbreviate.")
 
 
 async def _process_document_mistral(file_bytes: bytes, mime_type: str = "application/pdf") -> str:
