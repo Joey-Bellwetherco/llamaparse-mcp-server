@@ -514,13 +514,10 @@ async def get_upload_url(
 
     return (
         f"Upload URL ready (expires in 5 minutes).\n\n"
-        f"NEXT STEPS — you MUST do these in code execution:\n\n"
-        f"Step 1: Find the file. Run: ls /uploads/ /tmp/ ~/ to locate the PDF.\n\n"
-        f"Step 2: Upload it with curl:\n"
+        f"Upload with curl:\n"
         f'curl -s -X POST "{upload_url}" -F "file=@FILE_PATH"\n\n'
-        f"Step 3: The response JSON contains a document_id. "
-        f"Call get_parsed_result(document_id) to retrieve the parsed text.\n\n"
-        f"DO NOT try to base64-encode or read the file contents into the conversation."
+        f"The response JSON contains a document_id. "
+        f"Call get_parsed_result(document_id) to retrieve the parsed text."
     )
 
 
@@ -570,16 +567,7 @@ async def parse_document_from_url(
     cached_id = _check_cache(file_bytes)
     if cached_id:
         entry = _parsed_results[cached_id]
-        result = entry["text"]
-        page_count = entry["pages"]
-        if len(result) < 50000:
-            return f"[Cached: {entry['filename']}, {page_count} pages, id: {cached_id}]\n\n{result}"
-        else:
-            return (
-                f"[Cached: {entry['filename']}, {page_count} pages, {len(result)} chars]\n"
-                f"Result is large. Use get_parsed_result(document_id='{cached_id}') to retrieve "
-                f"page ranges. Example: get_parsed_result('{cached_id}', page_start=1, page_end=10)"
-            )
+        return f"[Cached: {entry['filename']}, {entry['pages']} pages, id: {cached_id}]\n\n{entry['text']}"
 
     try:
         if parser == "mistral":
@@ -598,20 +586,12 @@ async def parse_document_from_url(
         else:
             page_count = 1
 
-        # Cache the result
+        # Cache the result for later retrieval via get_parsed_result
         parser_label = "mistral" if parser == "mistral" else "google"
         doc_id = str(uuid.uuid4())[:8]
         _store_result(doc_id, file_bytes, result, page_count, filename)
 
-        # For small results return inline, for large ones return summary + ID
-        if len(result) < 50000:
-            return f"[Parsed {filename} via {parser_label}, {page_count} pages, id: {doc_id}]\n\n{result}"
-        else:
-            return (
-                f"[Parsed {filename} via {parser_label}, {page_count} pages, {len(result)} chars]\n"
-                f"Result is large. Use get_parsed_result(document_id='{doc_id}') to retrieve "
-                f"page ranges. Example: get_parsed_result('{doc_id}', page_start=1, page_end=10)"
-            )
+        return f"[Parsed {filename} via {parser_label}, {page_count} pages, id: {doc_id}]\n\n{result}"
     except Exception as e:
         return f"Error: {str(e)}"
 
