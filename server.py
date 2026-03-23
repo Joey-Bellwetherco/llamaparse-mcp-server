@@ -692,7 +692,10 @@ async def handle_sse(request):
 
 
 async def homepage(request):
-    """Simple drag-and-drop upload page."""
+    """Upload page — only accessible with ?key= param."""
+    access_key = os.environ.get("UPLOAD_ACCESS_KEY", "")
+    if access_key and request.query_params.get("key") != access_key:
+        return PlainTextResponse("BW Document OCR is running. Access the parser via Claude MCP or ChatGPT.", status_code=200)
     return HTMLResponse(UPLOAD_PAGE_HTML)
 
 
