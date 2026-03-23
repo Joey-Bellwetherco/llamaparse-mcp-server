@@ -588,7 +588,17 @@ async def parse_document_from_url(
     cached_id = _check_cache(file_bytes)
     if cached_id:
         entry = _parsed_results[cached_id]
-        return f"[Cached: {entry['filename']}, {entry['pages']} pages, id: {cached_id}]\n\n{entry['text']}"
+        result = entry["text"]
+        page_count = entry["pages"]
+        if len(result) < 50000:
+            return f"[Cached: {entry['filename']}, {page_count} pages, id: {cached_id}]\n\n{result}"
+        else:
+            return (
+                f"[Cached: {entry['filename']}, {page_count} pages, {len(result):,} chars, id: {cached_id}]\n\n"
+                f"Document is large. Use get_parsed_result(document_id='{cached_id}') to retrieve the full text.\n"
+                f"For specific pages: get_parsed_result('{cached_id}', page_start=1, page_end=5)\n"
+                f"Recommended: fetch 5-10 pages at a time for large documents."
+            )
 
     try:
         if parser == "mistral":
@@ -612,7 +622,16 @@ async def parse_document_from_url(
         doc_id = str(uuid.uuid4())[:8]
         _store_result(doc_id, file_bytes, result, page_count, filename)
 
-        return f"[Parsed {filename} via {parser_label}, {page_count} pages, id: {doc_id}]\n\n{result}"
+        # Small docs: return inline. Large docs: return metadata + hints for chunked retrieval
+        if len(result) < 50000:
+            return f"[Parsed {filename} via {parser_label}, {page_count} pages, id: {doc_id}]\n\n{result}"
+        else:
+            return (
+                f"[Parsed {filename} via {parser_label}, {page_count} pages, {len(result):,} chars, id: {doc_id}]\n\n"
+                f"Document is large. Use get_parsed_result(document_id='{doc_id}') to retrieve the full text.\n"
+                f"For specific pages: get_parsed_result('{doc_id}', page_start=1, page_end=5)\n"
+                f"Recommended: fetch 5-10 pages at a time for large documents."
+            )
     except Exception as e:
         return f"Error: {str(e)}"
 
