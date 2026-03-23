@@ -19,6 +19,7 @@ from mcp.server.sse import SseServerTransport
 from google.cloud import documentai_v1 as documentai
 from google.oauth2 import service_account
 from pypdf import PdfReader, PdfWriter
+from pydantic import BaseModel, Field
 
 load_dotenv()
 
@@ -331,9 +332,16 @@ def _get_mistral_client():
     return Mistral(api_key=MISTRAL_API_KEY)
 
 
+class _ImageAnnotation(BaseModel):
+    """Schema for Mistral bbox annotation — describes each extracted image."""
+    image_type: str = Field(..., description="Type of image: chart, table, logo, photo, diagram, figure, signature, or other")
+    description: str = Field(..., description="Brief description of what the image shows")
+
+
 async def _process_document_mistral(file_bytes: bytes, mime_type: str = "application/pdf") -> str:
     """Process a document using Mistral OCR. Supports up to 1000 pages / 50MB."""
     from mistralai.client import models as mistral_models
+    from mistralai.extra import response_format_from_pydantic_model
 
     client = _get_mistral_client()
 
@@ -345,7 +353,7 @@ async def _process_document_mistral(file_bytes: bytes, mime_type: str = "applica
         purpose="ocr",
     )
 
-    # Step 2: Run OCR with full extraction settings
+    # Step 2: Run OCR with full extraction settings + image annotations
     ocr_response = await asyncio.to_thread(
         client.ocr.process,
         model=MISTRAL_MODEL,
@@ -354,6 +362,7 @@ async def _process_document_mistral(file_bytes: bytes, mime_type: str = "applica
         extract_header=True,
         extract_footer=True,
         include_image_base64=False,
+        bbox_annotation_format=response_format_from_pydantic_model(_ImageAnnotation),
     )
 
     # Step 3: Convert response to [Page N] format matching Google output
@@ -371,6 +380,18 @@ async def _process_document_mistral(file_bytes: bytes, mime_type: str = "applica
             for table in page.tables:
                 placeholder = f"[{table.id}]({table.id})"
                 md = md.replace(placeholder, f"\n{table.content}\n")
+
+        # Append image annotations after their placeholders
+        if page.images:
+            for img in page.images:
+                placeholder = f"![{img.id}]({img.id})"
+                if img.image_annotation and placeholder in md:
+                    try:
+                        ann = json.loads(img.image_annotation) if isinstance(img.image_annotation, str) else img.image_annotation
+                        caption = f"\n[{ann.get('image_type', 'image')}: {ann.get('description', '')}]"
+                    except (json.JSONDecodeError, TypeError):
+                        caption = f"\n[image: {img.image_annotation}]"
+                    md = md.replace(placeholder, placeholder + caption)
 
         if md.strip():
             parts.append(md)
