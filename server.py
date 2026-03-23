@@ -423,7 +423,7 @@ def _store_result(doc_id: str, file_bytes: bytes, text: str, pages: int, filenam
     content_hash = hashlib.sha256(file_bytes).hexdigest()
     _content_hash_to_id[content_hash] = doc_id
 
-mcp = FastMCP("Bellwether Document Parser")
+mcp = FastMCP("BW Document OCR")
 
 
 @mcp.tool()
