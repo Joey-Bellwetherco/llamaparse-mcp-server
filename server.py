@@ -402,7 +402,7 @@ def _store_result(doc_id: str, file_bytes: bytes, text: str, pages: int, filenam
     content_hash = hashlib.sha256(file_bytes).hexdigest()
     _content_hash_to_id[content_hash] = doc_id
 
-mcp = FastMCP("Document AI MCP")
+mcp = FastMCP("Bellwether Document Parser")
 
 
 @mcp.tool()
@@ -410,68 +410,93 @@ async def get_parsed_result(
     document_id: str,
     page_start: int = 1,
     page_end: int = 0,
+    output_format: str = "markdown",
 ) -> str:
-    """Retrieve parsed text from a document that was uploaded and parsed via POST /parse.
+    """Get the parsed text content of a document by its ID.
 
-    The document_id is returned by the /parse endpoint. You can retrieve the full text
-    or a page range to avoid overloading the context window.
+    Use this when the user provides a document_id from a previous parse,
+    or after calling parse_document_from_url. Supports page ranges for large documents.
 
     Args:
-        document_id: The ID returned from POST /parse
+        document_id: The document ID (e.g. "4a0907f7")
         page_start: First page to return (1-indexed, default: 1)
         page_end: Last page to return (0 = all remaining pages)
+        output_format: "markdown" (default), "plain" (strip markers/HTML), or "tables_only" (just tables)
     """
     if document_id not in _parsed_results:
         return (
             f"Error: No parsed document with id '{document_id}'. "
-            "Upload and parse a file first via POST /parse endpoint."
+            "Upload and parse a file first via POST /parse endpoint or provide a URL."
         )
 
     entry = _parsed_results[document_id]
     full_text = entry["text"]
     total_pages = entry["pages"]
 
-    # If no page range requested, return full text
-    if page_start <= 1 and page_end <= 0:
-        return f"[Document: {entry['filename']}, {total_pages} pages]\n\n{full_text}"
+    # Page range extraction
+    if page_start > 1 or page_end > 0:
+        page_sections = re.split(r'(?=\[Page \d+\])', full_text)
+        page_sections = [s for s in page_sections if s.strip()]
+        page_map = {}
+        for section in page_sections:
+            match = re.match(r'\[Page (\d+)\]', section)
+            if match:
+                page_map[int(match.group(1))] = section
+        end = page_end if page_end > 0 else total_pages
+        selected_parts = [page_map[p] for p in range(page_start, end + 1) if p in page_map]
+        text = "\n\n".join(selected_parts) if selected_parts else "(No content for requested pages)"
+        header = f"[Document: {entry['filename']}, pages {page_start}-{end} of {total_pages}]"
+    else:
+        text = full_text
+        header = f"[Document: {entry['filename']}, {total_pages} pages]"
 
-    # Split by [Page N] markers for accurate page-range extraction
-    page_sections = re.split(r'(?=\[Page \d+\])', full_text)
-    page_sections = [s for s in page_sections if s.strip()]
+    # Format output
+    if output_format == "plain":
+        # Strip [Page N] markers, [Header], [Footer], and HTML tags
+        text = re.sub(r'\[Page \d+\]', '', text)
+        text = re.sub(r'\[(Header|Footer)\]', '', text)
+        text = re.sub(r'<[^>]+>', '', text)
+        text = re.sub(r'\n{3,}', '\n\n', text).strip()
+    elif output_format == "tables_only":
+        # Extract only table content (HTML tables or markdown tables)
+        tables = re.findall(r'(<table.*?</table>)', text, re.DOTALL)
+        md_tables = re.findall(r'(\|.+\|(?:\n\|.+\|)+)', text)
+        all_tables = tables + md_tables
+        if all_tables:
+            text = "\n\n---\n\n".join(all_tables)
+        else:
+            text = "(No tables found in this document)"
 
-    # Build a dict of page_num -> text
-    page_map = {}
-    for section in page_sections:
-        match = re.match(r'\[Page (\d+)\]', section)
-        if match:
-            pnum = int(match.group(1))
-            page_map[pnum] = section
+    return f"{header}\n\n{text}"
 
-    end = page_end if page_end > 0 else total_pages
-    selected_parts = []
-    for p in range(page_start, end + 1):
-        if p in page_map:
-            selected_parts.append(page_map[p])
 
-    selected = "\n\n".join(selected_parts) if selected_parts else "(No content for requested pages)"
-    return (
-        f"[Document: {entry['filename']}, showing pages {page_start}-"
-        f"{end} of {total_pages}]\n\n{selected}"
-    )
+@mcp.tool()
+async def list_documents() -> str:
+    """List all documents that have been parsed and are available in the cache.
+
+    Use this when the user asks "what documents have I parsed?", "show my documents",
+    or needs to find a document_id they forgot.
+    """
+    if not _parsed_results:
+        return f"No documents parsed yet. Upload a file at {UPLOAD_URL} or provide a URL to parse."
+
+    lines = [f"Parsed documents ({len(_parsed_results)}):\n"]
+    for doc_id, entry in _parsed_results.items():
+        lines.append(f"  {doc_id} — {entry['filename']} ({entry['pages']} pages, {len(entry['text']):,} chars)")
+
+    lines.append(f"\nTo retrieve text: call get_parsed_result(document_id)")
+    return "\n".join(lines)
 
 
 @mcp.tool()
 async def get_upload_url(
     filename: str = "document.pdf",
 ) -> str:
-    """IMPORTANT: When a user asks to parse a PDF, ALWAYS use this tool first.
-    DO NOT base64-encode the file. DO NOT try to send file contents as text.
+    """Get a one-time upload URL for parsing a PDF or image file.
 
-    This returns a one-time upload URL. After calling this tool:
-    1. Find the PDF file path in the sandbox (user attachments are at /uploads/ or similar)
-    2. Run the curl command in code execution to upload the file to the URL
-    3. Parse the JSON response to get the document_id
-    4. Call get_parsed_result(document_id) to retrieve the parsed text
+    Use this when the user wants to parse a local file. Returns a URL they can
+    upload to (via browser or curl). After upload, use get_parsed_result with the
+    returned document_id.
 
     Args:
         filename: Name of the file being uploaded
@@ -505,15 +530,16 @@ async def parse_document_from_url(
     mime_type: str = "application/pdf",
     parser: str = "mistral",
 ) -> str:
-    """Parse a document from a URL using Mistral OCR or Google Document AI.
+    """Parse a PDF, image, or document from a URL using OCR.
 
-    Provide a URL to a document (PDF or image) and get back the parsed text content.
-    For large documents, the result is cached — use get_parsed_result to retrieve pages.
+    Use this when the user says "parse this PDF", "OCR this document", "extract text
+    from this file", or provides a URL to a document. Supports PDF, PNG, JPG, TIFF.
+    Returns the full extracted text with page markers.
 
     Args:
         url: Direct URL to a document file
         mime_type: MIME type of the document (default: application/pdf)
-        parser: Which parser to use: "mistral" (default) or "google"
+        parser: Which OCR engine to use: "mistral" (default) or "google"
     """
     if parser == "mistral":
         if not MISTRAL_API_KEY:
@@ -595,29 +621,35 @@ UPLOAD_URL = os.environ.get("PUBLIC_URL", "https://bw-parse-mcp-server.up.railwa
 
 @mcp.tool()
 async def check_status() -> str:
-    """Check if the Document AI MCP server is configured and ready.
+    """Check parser status and see what documents have been parsed.
 
-    Also returns the upload URL where users can upload PDFs for parsing.
+    Call this to see available parsers, cached documents, and the upload URL.
     """
-    lines = ["Document AI MCP is running.\n"]
-
-    if GOOGLE_DOCAI_CREDENTIALS_PATH:
-        lines.append("Google Document AI: configured (Layout Parser with Gemini)")
-    else:
-        lines.append("Google Document AI: NOT configured (set GOOGLE_DOCAI_CREDENTIALS_PATH)")
+    lines = ["Bellwether Document Parser is running.\n"]
 
     if MISTRAL_API_KEY:
-        lines.append(f"Mistral OCR: configured (model: {MISTRAL_MODEL})")
+        lines.append(f"Mistral OCR: ready (model: {MISTRAL_MODEL})")
     else:
-        lines.append("Mistral OCR: NOT configured (set MISTRAL_API_KEY)")
+        lines.append("Mistral OCR: NOT configured")
+
+    if GOOGLE_DOCAI_CREDENTIALS_PATH:
+        lines.append("Google Document AI: ready")
+    else:
+        lines.append("Google Document AI: NOT configured")
+
+    # Show cached documents
+    if _parsed_results:
+        lines.append(f"\nParsed documents in cache ({len(_parsed_results)}):")
+        for doc_id, entry in _parsed_results.items():
+            lines.append(f"  {doc_id} — {entry['filename']} ({entry['pages']} pages, {len(entry['text'])} chars)")
+    else:
+        lines.append("\nNo documents parsed yet.")
 
     lines.append(
-        f"\nTo parse a PDF, NEVER base64-encode it. Instead:\n"
-        f"1. Call get_upload_url(filename) to get a one-time upload URL\n"
-        f"2. In code execution, run: curl -s -X POST \"<url>\" -F \"file=@/path/to/file.pdf\"\n"
-        f"3. Call get_parsed_result(document_id) with the ID from the curl response\n\n"
-        f"For URLs: call parse_document_from_url(url, parser='google' or 'mistral') directly.\n"
-        f"Manual upload: {UPLOAD_URL}"
+        f"\nHow to parse:\n"
+        f"- From URL: call parse_document_from_url(url)\n"
+        f"- Upload manually: {UPLOAD_URL}\n"
+        f"- Retrieve text: call get_parsed_result(document_id)"
     )
 
     return "\n".join(lines)
