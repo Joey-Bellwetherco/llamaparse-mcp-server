@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BW Document OCR</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: #ffffff; color: #1a1a1a; padding: 1rem; }
+  .container { max-width: 500px; margin: 0 auto; }
+  h2 { font-size: 1.1rem; margin-bottom: 0.5rem; }
+  .sub { color: #666; font-size: 0.85rem; margin-bottom: 1rem; }
+  .drop-zone { border: 2px dashed #d1d5db; border-radius: 10px; padding: 2rem 1.5rem;
+               text-align: center; cursor: pointer; transition: all 0.2s; }
+  .drop-zone:hover, .drop-zone.drag-over { border-color: #3b82f6; background: #f0f7ff; }
+  .drop-zone input { display: none; }
+  .drop-zone p { color: #666; font-size: 0.9rem; }
+  .drop-zone .icon { font-size: 2rem; margin-bottom: 0.3rem; }
+  #status { margin-top: 1rem; }
+  .parsing { color: #b45309; font-size: 0.9rem; }
+  .success { background: #f0fdf4; border: 1px solid #86efac; border-radius: 8px;
+             padding: 1rem; margin-top: 0.75rem; }
+  .success p { font-size: 0.9rem; margin-bottom: 0.5rem; }
+  .download-btn { display: inline-block; background: #3b82f6; color: white; border: none;
+                  padding: 0.5rem 1.2rem; border-radius: 6px; cursor: pointer;
+                  font-size: 0.85rem; text-decoration: none; }
+  .download-btn:hover { background: #2563eb; }
+  .error { color: #dc2626; font-size: 0.9rem; margin-top: 0.75rem; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h2>BW Document OCR</h2>
+  <p class="sub">Upload a PDF or image to parse with Mistral OCR</p>
+  <div class="drop-zone" id="dropZone">
+    <div class="icon">&#128196;</div>
+    <p>Drag & drop a file here, or click to browse</p>
+    <input type="file" id="fileInput" accept=".pdf,.png,.jpg,.jpeg,.tiff,.gif,.bmp,.webp">
+  </div>
+  <div id="status"></div>
+</div>
+<script>
+const SERVER_URL = 'https://bw-parse-mcp-server.up.railway.app';
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+const status = document.getElementById('status');
+
+// Detect if running inside ChatGPT iframe
+const inChatGPT = window.parent !== window && typeof window.openai !== 'undefined';
+
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault(); dropZone.classList.remove('drag-over');
+  if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', () => { if (fileInput.files.length) handleFile(fileInput.files[0]); });
+
+async function handleFile(file) {
+  status.innerHTML = '<p class="parsing">Parsing ' + file.name + ' with Mistral OCR...</p>';
+
+  try {
+    let downloadUrl;
+
+    if (inChatGPT) {
+      // ChatGPT App mode: upload via OpenAI's file API, get a download URL
+      const { fileId } = await window.openai.uploadFile(file);
+      const { url } = await window.openai.getFileDownloadUrl({ fileId });
+      downloadUrl = url;
+    } else {
+      // Standalone mode: upload directly to our server, get doc_id, build result URL
+      const form = new FormData();
+      form.append('file', file);
+      const resp = await fetch(SERVER_URL + '/parse?parser=mistral', { method: 'POST', body: form });
+      const data = await resp.json();
+      if (data.error) { showError(data.error); return; }
+      showSuccess(data, file.name);
+      return;
+    }
+
+    // ChatGPT path: send the download URL to our parse-url endpoint
+    const resp = await fetch(SERVER_URL + '/parse-url', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: downloadUrl, parser: 'mistral' }),
+    });
+    const data = await resp.json();
+    if (data.error) { showError(data.error); return; }
+    showSuccess(data, file.name);
+
+    // Notify ChatGPT of the result via postMessage bridge
+    if (inChatGPT) {
+      window.parent.postMessage({
+        jsonrpc: '2.0',
+        method: 'ui/notifications/tool-result',
+        params: {
+          structuredContent: data,
+          content: 'Parsed ' + file.name + ': ' + data.pages + ' pages, ' + data.chars + ' chars',
+        }
+      }, '*');
+    }
+
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
+function showSuccess(data, filename) {
+  const resultUrl = SERVER_URL + '/result-file/' + data.document_id;
+  const baseName = filename.replace(/\.[^.]+$/, '');
+  status.innerHTML = `
+    <div class="success">
+      <p>Parsed <strong>${data.filename || filename}</strong> (${data.pages} pages, ${Number(data.chars).toLocaleString()} chars)</p>
+      <a class="download-btn" href="${resultUrl}" target="_blank" download="${baseName}.md">Download ${baseName}.md</a>
+    </div>`;
+}
+
+function showError(msg) {
+  status.innerHTML = '<p class="error">Error: ' + msg + '</p>';
+}
+
+// ChatGPT bridge: listen for initialization
+if (inChatGPT) {
+  window.addEventListener('message', (event) => {
+    if (event.source !== window.parent) return;
+    const msg = event.data;
+    if (msg.jsonrpc !== '2.0') return;
+    if (msg.method === 'ui/initialize') {
+      window.parent.postMessage({
+        jsonrpc: '2.0',
+        method: 'ui/notifications/initialized',
+        params: {}
+      }, '*');
+    }
+  });
+}
+</script>
+</body>
+</html>

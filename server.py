@@ -1279,6 +1279,17 @@ async def register(request):
     })
 
 
+async def widget_endpoint(request):
+    """Serve the ChatGPT App widget HTML."""
+    widget_path = os.path.join(os.path.dirname(__file__), "public", "parser-widget.html")
+    with open(widget_path, "r", encoding="utf-8") as f:
+        content = f.read()
+    return Response(content, media_type="text/html;profile=mcp-app")
+
+
+from starlette.middleware import Middleware
+from starlette.middleware.cors import CORSMiddleware
+
 app = Starlette(
     routes=[
         Route("/", homepage),
@@ -1293,11 +1304,15 @@ app = Starlette(
         Route("/upload/{token}", token_upload_endpoint, methods=["POST"]),
         Route("/result/{doc_id}", get_result_endpoint),
         Route("/result-file/{doc_id}", get_result_file_endpoint),
+        Route("/widget/parser", widget_endpoint),
         Route("/sse", endpoint=handle_sse),
         Mount("/messages/", app=sse.handle_post_message),
         Route("/.well-known/oauth-protected-resource", oauth_protected_resource),
         Route("/.well-known/oauth-authorization-server", oauth_authorization_server),
         Route("/register", register, methods=["POST"]),
+    ],
+    middleware=[
+        Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]),
     ],
 )
 
