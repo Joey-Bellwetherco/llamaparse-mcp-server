@@ -358,7 +358,7 @@ async def _process_document_mistral(file_bytes: bytes, mime_type: str = "applica
         client.ocr.process,
         model=MISTRAL_MODEL,
         document=mistral_models.FileChunk(file_id=uploaded.id, type="file"),
-        table_format="html",
+        table_format="markdown",
         extract_header=True,
         extract_footer=True,
         include_image_base64=False,
@@ -374,7 +374,7 @@ async def _process_document_mistral(file_bytes: bytes, mime_type: str = "applica
         if page.header:
             parts.append(f"[Header]\n{page.header}")
 
-        # Inline table HTML into markdown (replace [tbl-X.html](tbl-X.html) placeholders)
+        # Inline table content (replace [tbl-X](tbl-X) placeholders)
         md = page.markdown or ""
         if page.tables:
             for table in page.tables:
