@@ -8,50 +8,59 @@
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; }
   body { font-family: 'Avenir LT Std', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-         background: #fff; color: #1C2B5A; display: flex; align-items: stretch;
-         justify-content: center; padding: 16px; min-height: 100%; }
-  .widget { width: 100%; max-width: 460px; display: flex; flex-direction: column; }
-  .brand { font-size: 14px; font-weight: 600; letter-spacing: 0.5px; color: #1C2B5A;
-           text-transform: uppercase; margin-bottom: 4px; text-align: center; }
-  .brand span { color: #0073E5; }
-  .sub { color: #6B7A8D; font-size: 13px; margin-bottom: 14px; text-align: center; }
-  .drop-zone { border: 2px dashed #99BDE3; border-radius: 8px; padding: 40px 20px;
-               cursor: pointer; transition: all 0.2s; background: rgba(0, 115, 229, 0.02);
-               flex: 1; display: flex; flex-direction: column; align-items: center;
-               justify-content: center; min-height: 160px; }
-  .drop-zone:hover, .drop-zone.drag-over { border-color: #0073E5; background: rgba(0, 115, 229, 0.06); }
+         background: #fff; color: #1C2B5A; padding: 0; }
+  .card { border: 1px solid #D6DEE8; border-radius: 10px; padding: 20px 24px;
+          max-width: 480px; margin: 0 auto; }
+  .header { display: flex; align-items: center; gap: 10px; margin-bottom: 16px;
+            padding-bottom: 12px; border-bottom: 1px solid #EDF1F5; }
+  .header .logo { width: 6px; height: 24px; background: #0073E5; border-radius: 3px; }
+  .header .title { font-size: 13px; font-weight: 600; letter-spacing: 0.8px;
+                   color: #1C2B5A; text-transform: uppercase; }
+  .header .title span { color: #0073E5; }
+  .drop-zone { border: 1.5px dashed #B8C9DB; border-radius: 8px; padding: 32px 20px;
+               cursor: pointer; transition: all 0.15s; background: #FAFBFD;
+               display: flex; flex-direction: column; align-items: center;
+               justify-content: center; text-align: center; }
+  .drop-zone:hover, .drop-zone.drag-over { border-color: #0073E5; background: #F0F6FD; }
   .drop-zone input { display: none; }
-  .drop-zone .icon { font-size: 28px; margin-bottom: 4px; opacity: 0.6; }
-  .drop-zone p { color: #6B7A8D; font-size: 12px; }
-  .drop-zone .formats { font-size: 10px; color: #99BDE3; margin-top: 4px; }
-  #status { margin-top: 10px; }
-  .parsing { color: #0073E5; font-size: 12px; display: flex; align-items: center;
-             justify-content: center; gap: 6px; }
-  .parsing .spinner { width: 14px; height: 14px; border: 2px solid #99BDE3;
+  .drop-zone .icon { font-size: 24px; margin-bottom: 6px; opacity: 0.5; }
+  .drop-zone p { color: #6B7A8D; font-size: 13px; }
+  .drop-zone .formats { font-size: 10px; color: #A3B0B8; margin-top: 3px;
+                        letter-spacing: 0.5px; text-transform: uppercase; }
+  #status { margin-top: 14px; }
+  .parsing { color: #0073E5; font-size: 13px; display: flex; align-items: center;
+             justify-content: center; gap: 8px; padding: 8px 0; }
+  .parsing .spinner { width: 14px; height: 14px; border: 2px solid #B8C9DB;
                       border-top-color: #0073E5; border-radius: 50%;
-                      animation: spin 0.8s linear infinite; }
+                      animation: spin 0.7s linear infinite; flex-shrink: 0; }
   @keyframes spin { to { transform: rotate(360deg); } }
-  .success { background: rgba(0, 115, 229, 0.04); border: 1px solid #99BDE3;
-             border-radius: 8px; padding: 10px 12px; text-align: left; }
-  .success .meta { font-size: 12px; color: #1C2B5A; margin-bottom: 8px; }
-  .success .meta strong { font-weight: 600; }
-  .download-btn { display: inline-flex; align-items: center; gap: 5px; background: #0073E5;
-                  color: #fff; border: none; padding: 7px 14px; border-radius: 6px;
-                  cursor: pointer; font-size: 12px; font-weight: 500; text-decoration: none;
-                  transition: background 0.2s; }
-  .download-btn:hover { background: #005BB5; }
-  .download-btn svg { width: 14px; height: 14px; fill: currentColor; }
-  .error { color: #C0392B; font-size: 12px; margin-top: 8px; }
+  .result { background: #F7F9FB; border: 1px solid #D6DEE8; border-radius: 8px;
+            padding: 12px 14px; }
+  .result .meta { font-size: 13px; color: #1C2B5A; margin-bottom: 10px; line-height: 1.4; }
+  .result .meta strong { font-weight: 600; }
+  .result .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .btn { display: inline-flex; align-items: center; gap: 5px; padding: 8px 14px;
+         border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 500;
+         text-decoration: none; transition: all 0.15s; border: none; }
+  .btn-primary { background: #0073E5; color: #fff; }
+  .btn-primary:hover { background: #005BB5; }
+  .btn-secondary { background: #fff; color: #1C2B5A; border: 1px solid #D6DEE8; }
+  .btn-secondary:hover { background: #F0F6FD; border-color: #0073E5; }
+  .btn svg { width: 14px; height: 14px; fill: currentColor; }
+  .copied { font-size: 11px; color: #0073E5; font-weight: 500; }
+  .error { color: #C0392B; font-size: 12px; padding: 6px 0; }
 </style>
 </head>
 <body>
-<div class="widget">
-  <div class="brand"><span>Bellwether</span> Document Parser</div>
-  <p class="sub">Drop a file to extract text with OCR</p>
+<div class="card">
+  <div class="header">
+    <div class="logo"></div>
+    <div class="title"><span>Bellwether</span> Document Parser</div>
+  </div>
   <div class="drop-zone" id="dropZone">
     <div class="icon">&#128462;</div>
     <p>Drag & drop a file here, or click to browse</p>
-    <div class="formats">PDF, PNG, JPG, TIFF</div>
+    <div class="formats">PDF &middot; PNG &middot; JPG &middot; TIFF</div>
     <input type="file" id="fileInput" accept=".pdf,.png,.jpg,.jpeg,.tiff,.gif,.bmp,.webp">
   </div>
   <div id="status"></div>
@@ -62,11 +71,10 @@ const dropZone = document.getElementById('dropZone');
 const fileInput = document.getElementById('fileInput');
 const status = document.getElementById('status');
 
-// Tell ChatGPT how tall we need to be
 function notifyHeight() {
   try {
     if (window.openai && window.openai.notifyIntrinsicHeight) {
-      window.openai.notifyIntrinsicHeight(document.body.scrollHeight);
+      window.openai.notifyIntrinsicHeight(document.querySelector('.card').offsetHeight + 4);
     }
   } catch (e) {}
 }
@@ -81,20 +89,14 @@ dropZone.addEventListener('drop', e => {
 fileInput.addEventListener('change', () => { if (fileInput.files.length) handleFile(fileInput.files[0]); });
 
 async function handleFile(file) {
-  status.innerHTML = '<div class="parsing"><div class="spinner"></div> Parsing ' + file.name + '...</div>';
+  status.innerHTML = '<div class="parsing"><div class="spinner"></div>Parsing ' + file.name + '...</div>';
   notifyHeight();
 
   try {
     const form = new FormData();
     form.append('file', file);
-    const resp = await fetch(SERVER_URL + '/parse?parser=mistral', {
-      method: 'POST',
-      body: form,
-    });
-    if (!resp.ok) {
-      showError('Server returned ' + resp.status);
-      return;
-    }
+    const resp = await fetch(SERVER_URL + '/parse?parser=mistral', { method: 'POST', body: form });
+    if (!resp.ok) { showError('Server returned ' + resp.status); return; }
     const data = await resp.json();
     if (data.error) { showError(data.error); return; }
     showSuccess(data, file.name);
@@ -107,44 +109,57 @@ function showSuccess(data, filename) {
   const resultUrl = SERVER_URL + '/result-file/' + data.document_id;
   const baseName = filename.replace(/\.[^.]+$/, '');
   status.innerHTML = `
-    <div class="success">
-      <div class="meta"><strong>${data.filename || filename}</strong> &mdash; ${data.pages} pages, ${Number(data.chars).toLocaleString()} chars</div>
-      <button class="download-btn" id="copyBtn">
-        <svg viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
-        Copy download link
-      </button>
-      <span id="copyMsg" style="font-size:11px;color:#0073E5;margin-left:8px;display:none;">Copied!</span>
+    <div class="result">
+      <div class="meta"><strong>${data.filename || filename}</strong><br>${data.pages} page${data.pages !== 1 ? 's' : ''} &middot; ${Number(data.chars).toLocaleString()} characters extracted</div>
+      <div class="actions">
+        <button class="btn btn-primary" id="dlBtn">
+          <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+          Download .md
+        </button>
+        <button class="btn btn-secondary" id="newBtn">Parse another</button>
+      </div>
     </div>`;
-  document.getElementById('copyBtn').addEventListener('click', () => {
-    navigator.clipboard.writeText(resultUrl).then(() => {
-      const msg = document.getElementById('copyMsg');
-      msg.style.display = 'inline';
-      setTimeout(() => msg.style.display = 'none', 2000);
-    });
+  document.getElementById('dlBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('dlBtn');
+    btn.textContent = 'Downloading...';
+    try {
+      const r = await fetch(resultUrl);
+      const json = await r.json();
+      const file = json.openaiFileResponse[0];
+      const bytes = atob(file.content);
+      const blob = new Blob([bytes], { type: 'text/markdown' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = baseName + '.md';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(a.href);
+      btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"/></svg> Downloaded';
+    } catch (e) {
+      btn.textContent = 'Download failed';
+    }
+  });
+  document.getElementById('newBtn').addEventListener('click', () => {
+    status.innerHTML = '';
+    fileInput.value = '';
+    notifyHeight();
   });
   notifyHeight();
 }
 
 function showError(msg) {
-  status.innerHTML = '<p class="error">' + msg + '</p>';
+  status.innerHTML = '<div class="error">' + msg + '</div>';
   notifyHeight();
 }
 
-// ChatGPT bridge + height notification on load
-window.addEventListener('load', () => {
-  notifyHeight();
-});
-
+window.addEventListener('load', notifyHeight);
 window.addEventListener('message', (event) => {
   if (event.source !== window.parent) return;
   const msg = event.data;
   if (!msg || msg.jsonrpc !== '2.0') return;
   if (msg.method === 'ui/initialize') {
-    window.parent.postMessage({
-      jsonrpc: '2.0',
-      method: 'ui/notifications/initialized',
-      params: {}
-    }, '*');
+    window.parent.postMessage({ jsonrpc: '2.0', method: 'ui/notifications/initialized', params: {} }, '*');
     notifyHeight();
   }
 });
