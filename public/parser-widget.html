@@ -129,61 +129,39 @@ async function handleFile(file) {
   notifyHeight();
 
   try {
-    if (window.openai && window.openai.uploadFile) {
-      // Step 1: Upload to OpenAI
-      let uploadResult;
-      try {
-        uploadResult = await window.openai.uploadFile(file);
-      } catch (e) {
-        showError('Upload failed: ' + e.message);
-        return;
-      }
+    // Read file as base64 and send directly to server via MCP tool
+    const b64 = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result.split(',')[1]);
+      reader.onerror = () => reject(new Error('Failed to read file'));
+      reader.readAsDataURL(file);
+    });
 
-      // Step 2: Get download URL
-      let fileUrl;
-      try {
-        const dlResult = await window.openai.getFileDownloadUrl({ fileId: uploadResult.fileId });
-        fileUrl = dlResult.url || dlResult.download_url || (typeof dlResult === 'string' ? dlResult : null);
-      } catch (e) {
-        showError('Get URL failed: ' + e.message);
-        return;
-      }
+    let result;
+    try {
+      result = await rpcRequest('tools/call', {
+        name: 'parse_from_base64',
+        arguments: { data: b64, filename: file.name },
+      });
+    } catch (e) {
+      showError('Parse failed: ' + e.message);
+      return;
+    }
 
-      if (!fileUrl) {
-        showError('No download URL returned. Response: ' + JSON.stringify(dlResult).slice(0, 300));
-        return;
+    let data;
+    if (result && result.content) {
+      const textItem = result.content.find(c => c.type === 'text');
+      if (textItem) {
+        try { data = JSON.parse(textItem.text); } catch (e) { data = null; }
       }
-
-      // Step 3: Parse via MCP bridge
-      let result;
-      try {
-        result = await rpcRequest('tools/call', {
-          name: 'parse_from_url',
-          arguments: { url: fileUrl },
-        });
-      } catch (e) {
-        showError('Parse tool call failed: ' + e.message);
-        return;
-      }
-
-      // Step 4: Extract result
-      let data;
-      if (result && result.content) {
-        const textItem = result.content.find(c => c.type === 'text');
-        if (textItem) {
-          try { data = JSON.parse(textItem.text); } catch (e) { data = null; }
-        }
-      }
-      if (data && data.document_id) {
-        showSuccess(data, file.name);
-      } else {
-        showError('Parse returned no result. Raw: ' + JSON.stringify(result).slice(0, 200));
-      }
+    }
+    if (data && data.document_id) {
+      showSuccess(data, file.name);
     } else {
-      showError('OpenAI file API not available (window.openai=' + typeof window.openai + ')');
+      showError('Parse returned no result. Raw: ' + JSON.stringify(result).slice(0, 200));
     }
   } catch (e) {
-    showError('Unexpected: ' + e.message);
+    showError('Error: ' + e.message);
   }
 }
 
