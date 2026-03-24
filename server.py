@@ -504,6 +504,32 @@ async def get_parsed_result(
 
 
 @mcp.tool()
+async def get_download_link(
+    document_id: str,
+) -> str:
+    """Get a download link for a parsed document as a markdown file.
+
+    Use this when the user says "download", "give me the file", "export as markdown",
+    or "save as md". Returns a direct download URL — present it as a clickable link.
+    Do NOT read or summarize the file contents. Just give the user the link.
+
+    Args:
+        document_id: The document ID (e.g. "4a0907f7")
+    """
+    if document_id not in _parsed_results:
+        return f"Error: No document with id '{document_id}'."
+
+    entry = _parsed_results[document_id]
+    base_name = entry["filename"].rsplit(".", 1)[0] if "." in entry["filename"] else entry["filename"]
+
+    return (
+        f"Download link for {entry['filename']} ({entry['pages']} pages, {len(entry['text']):,} chars):\n\n"
+        f"{UPLOAD_URL}/result-file/{document_id}\n\n"
+        f"Give this link to the user as a clickable download. Do NOT read or summarize the file."
+    )
+
+
+@mcp.tool()
 async def list_documents() -> str:
     """List all documents that have been parsed and are available in the cache.
 
@@ -609,7 +635,8 @@ async def parse_document_from_url(
                 f"[Cached: {entry['filename']}, {page_count} pages, {len(result):,} chars, id: {cached_id}]\n\n"
                 f"Document is large. Use get_parsed_result(document_id='{cached_id}') to retrieve the full text.\n"
                 f"For specific pages: get_parsed_result('{cached_id}', page_start=1, page_end=5)\n"
-                f"Recommended: fetch 5-10 pages at a time for large documents."
+                f"Recommended: fetch 5-10 pages at a time for large documents.\n"
+                f"For a downloadable .md file: call get_download_link(document_id)"
             )
 
     try:
@@ -642,7 +669,8 @@ async def parse_document_from_url(
                 f"[Parsed {filename} via {parser_label}, {page_count} pages, {len(result):,} chars, id: {doc_id}]\n\n"
                 f"Document is large. Use get_parsed_result(document_id='{doc_id}') to retrieve the full text.\n"
                 f"For specific pages: get_parsed_result('{doc_id}', page_start=1, page_end=5)\n"
-                f"Recommended: fetch 5-10 pages at a time for large documents."
+                f"Recommended: fetch 5-10 pages at a time for large documents.\n"
+                f"For a downloadable .md file: call get_download_link(document_id)"
             )
     except Exception as e:
         return f"Error: {str(e)}"
