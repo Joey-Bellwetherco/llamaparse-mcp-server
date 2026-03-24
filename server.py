@@ -426,6 +426,15 @@ def _store_result(doc_id: str, file_bytes: bytes, text: str, pages: int, filenam
 mcp = FastMCP("BW Document OCR")
 
 
+# Register the widget as an MCP App resource for ChatGPT iframe rendering
+@mcp.resource("ui://widget/parser.html", name="parser-widget", mime_type="text/html",
+              description="Document OCR upload widget — drag and drop PDFs to parse with Mistral OCR")
+def get_parser_widget():
+    widget_path = os.path.join(os.path.dirname(__file__), "public", "parser-widget.html")
+    with open(widget_path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
 @mcp.tool()
 async def get_parsed_result(
     document_id: str,
