@@ -227,7 +227,7 @@ async function handleFile(file) {
 
     if (data.chars > LARGE_CHAR_LIMIT) {
       // Large doc — send download link to chat
-      sendToChat('I just parsed "' + (data.filename || file.name) + '" (' + data.pages + ' pages, ' + Number(data.chars).toLocaleString() + ' characters). The document is too large to display inline.\n\nDownload the parsed result here:\n' + dlUrl);
+      sendToChat('I just parsed "' + (data.filename || file.name) + '" (' + data.pages + ' pages, ' + Number(data.chars).toLocaleString() + ' characters). The document is too large to display inline.\n\nDownload the parsed markdown here: [' + baseName + '.md](' + dlUrl + ')');
       showDone(data.filename || file.name, data.pages, data.chars, 'download link sent to chat');
     } else {
       // Small doc — send full text to chat
@@ -239,7 +239,7 @@ async function handleFile(file) {
         showDone(data.filename || file.name, data.pages, data.chars, 'sent to chat');
       } catch (e) {
         // fetch blocked — fall back to download link
-        sendToChat('I just parsed "' + (data.filename || file.name) + '" (' + data.pages + ' pages). Download the parsed result:\n' + dlUrl);
+        sendToChat('I just parsed "' + (data.filename || file.name) + '" (' + data.pages + ' pages). Download the parsed markdown here: [' + baseName + '.md](' + dlUrl + ')');
         showDone(data.filename || file.name, data.pages, data.chars, 'download link sent to chat');
       }
     }
