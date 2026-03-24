@@ -433,6 +433,7 @@ mcp = FastMCP(
 
 # Register the widget as an MCP App resource for ChatGPT iframe rendering
 _WIDGET_URI = "ui://widget/parser.html"
+import mcp.types as mcp_types
 
 
 @mcp.resource(_WIDGET_URI, name="parser-widget", mime_type="text/html",
@@ -441,6 +442,23 @@ def get_parser_widget():
     widget_path = os.path.join(os.path.dirname(__file__), "public", "parser-widget.html")
     with open(widget_path, "r", encoding="utf-8") as f:
         return f.read()
+
+
+# ChatGPT App widget tool — opens the upload widget iframe
+@mcp.tool(
+    meta={
+        "openai/outputTemplate": _WIDGET_URI,
+        "openai/toolInvocation/invoking": "Opening document parser...",
+        "openai/toolInvocation/invoked": "Parser ready — drop a file to parse",
+    },
+)
+async def upload_and_parse() -> str:
+    """Upload and parse a PDF document with Mistral OCR.
+
+    Use this when the user wants to parse a PDF or image. Opens the upload widget
+    where they can drag and drop files.
+    """
+    return "Upload widget ready. Drag and drop a PDF to parse with Mistral OCR."
 
 
 @mcp.tool()
