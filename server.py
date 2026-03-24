@@ -1,7 +1,4 @@
 import os
-# Allow all hosts/origins for MCP streamable HTTP (must be set before any MCP imports)
-os.environ["MCP_ALLOWED_HOSTS"] = "*"
-os.environ["MCP_ALLOWED_ORIGINS"] = "*"
 import io
 import re
 import json
@@ -426,7 +423,12 @@ def _store_result(doc_id: str, file_bytes: bytes, text: str, pages: int, filenam
     content_hash = hashlib.sha256(file_bytes).hexdigest()
     _content_hash_to_id[content_hash] = doc_id
 
-mcp = FastMCP("BW Document OCR")
+from mcp.server.transport_security import TransportSecuritySettings
+
+mcp = FastMCP(
+    "BW Document OCR",
+    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+)
 
 
 # Register the widget as an MCP App resource for ChatGPT iframe rendering
