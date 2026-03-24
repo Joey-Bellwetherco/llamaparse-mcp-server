@@ -464,11 +464,12 @@ async def upload_and_parse() -> str:
 
 
 @mcp_chatgpt.tool()
-async def parse_from_url(url: str) -> str:
+async def parse_from_url(url: str, filename: str = "") -> str:
     """Parse a document from a URL using OCR.
 
     Args:
         url: Direct URL to the document file
+        filename: Optional original filename (used when URL doesn't contain a meaningful name)
     """
     if not MISTRAL_API_KEY:
         return "Error: No Mistral API key configured."
@@ -480,9 +481,10 @@ async def parse_from_url(url: str) -> str:
     except Exception as e:
         return f"Error downloading: {str(e)}"
 
-    filename = url.split("/")[-1].split("?")[0] or "document.pdf"
+    if not filename:
+        filename = url.split("/")[-1].split("?")[0] or "document.pdf"
     mime_type = "application/pdf"
-    lower = url.lower().split("?")[0]
+    lower = filename.lower()
     if lower.endswith(".png"): mime_type = "image/png"
     elif lower.endswith((".jpg", ".jpeg")): mime_type = "image/jpeg"
 

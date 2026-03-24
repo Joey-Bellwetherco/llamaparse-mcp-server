@@ -201,7 +201,7 @@ async function handleFile(file) {
     try {
       result = await rpcRequest('tools/call', {
         name: 'parse_from_url',
-        arguments: { url: fileUrl },
+        arguments: { url: fileUrl, filename: file.name },
       });
     } catch (e) {
       showError('Parse failed: ' + e.message);
