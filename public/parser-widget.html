@@ -144,57 +144,62 @@ async function handleFile(file) {
   notifyHeight();
 
   try {
-    // Try direct XHR to server first, fall back to base64 via MCP
-    const formData = new FormData();
-    formData.append('file', file);
+    if (!(window.openai && window.openai.uploadFile)) {
+      showError('OpenAI file API not available');
+      return;
+    }
 
-    let data;
+    // Step 1: Upload file to OpenAI
+    let uploadResult;
     try {
-      const xhr = await new Promise((resolve, reject) => {
-        const x = new XMLHttpRequest();
-        x.open('POST', SERVER_URL + '/parse?parser=mistral');
-        x.onload = () => {
-          if (x.status >= 200 && x.status < 300) resolve(x.responseText);
-          else reject(new Error('Server returned ' + x.status));
-        };
-        x.onerror = () => reject(new Error('XHR blocked'));
-        x.timeout = 120000;
-        x.ontimeout = () => reject(new Error('Timeout'));
-        x.send(formData);
-      });
-      data = JSON.parse(xhr);
-    } catch (xhrErr) {
-      // XHR blocked by sandbox — fall back to base64 via MCP (small files only)
-      if (file.size > 5 * 1024 * 1024) {
-        showError('File too large for iframe upload. Use the /parse endpoint directly.');
+      uploadResult = await window.openai.uploadFile(file);
+    } catch (e) {
+      showError('Upload failed: ' + e.message);
+      return;
+    }
+
+    // Step 2: Get download URL
+    let fileUrl;
+    try {
+      const dlResult = await window.openai.getFileDownloadUrl({ fileId: uploadResult.fileId });
+      // Try all known field names
+      fileUrl = dlResult.url || dlResult.download_url || dlResult.downloadUrl
+        || (dlResult.data && (dlResult.data.url || dlResult.data.download_url))
+        || (typeof dlResult === 'string' ? dlResult : null);
+      if (!fileUrl) {
+        // Debug: show what we got back
+        showError('DEBUG upload: ' + JSON.stringify(uploadResult).slice(0, 200) + ' | dlResult: ' + JSON.stringify(dlResult).slice(0, 200));
         return;
       }
-      const b64 = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result.split(',')[1]);
-        reader.onerror = () => reject(new Error('Failed to read file'));
-        reader.readAsDataURL(file);
+    } catch (e) {
+      showError('Get URL failed: ' + e.message);
+      return;
+    }
+
+    // Step 3: Parse via MCP bridge
+    let result;
+    try {
+      result = await rpcRequest('tools/call', {
+        name: 'parse_from_url',
+        arguments: { url: fileUrl },
       });
-      let result;
-      try {
-        result = await rpcRequest('tools/call', {
-          name: 'parse_from_base64',
-          arguments: { data: b64, filename: file.name },
-        });
-      } catch (e) {
-        showError('Parse failed: ' + e.message);
-        return;
-      }
-      const textItem = result && result.content && result.content.find(c => c.type === 'text');
+    } catch (e) {
+      showError('Parse failed: ' + e.message);
+      return;
+    }
+
+    // Step 4: Extract result
+    let data;
+    if (result && result.content) {
+      const textItem = result.content.find(c => c.type === 'text');
       if (textItem) {
         try { data = JSON.parse(textItem.text); } catch (e) { data = null; }
       }
     }
-
     if (data && data.document_id) {
       showSuccess(data, file.name);
     } else {
-      showError('Parse returned no result.');
+      showError('Parse returned no result. Raw: ' + JSON.stringify(result).slice(0, 200));
     }
   } catch (e) {
     showError('Error: ' + e.message);
