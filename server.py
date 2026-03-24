@@ -1307,48 +1307,36 @@ from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 
 
-# --- Combined app: HTTP routes + SSE (Claude) + Streamable HTTP (ChatGPT) ---
-# The streamable HTTP app from FastMCP handles /mcp for ChatGPT Apps.
-# We compose it with our custom routes using a path-dispatching ASGI app.
+# --- Combined app: use FastMCP's streamable HTTP app as the base,
+# then add all our custom routes. This ensures /mcp works for ChatGPT
+# and all HTTP routes + /sse work for Claude and the web UI. ---
 
-_http_routes_app = Starlette(
-    routes=[
-        Route("/", homepage),
-        Route("/favicon-32.png", favicon),
-        Route("/favicon.ico", favicon),
-        Route("/health", health),
-        Route("/parse", parse_endpoint, methods=["POST"]),
-        Route("/parse-url", parse_url_endpoint, methods=["POST"]),
-        Route("/parse-chatgpt", parse_chatgpt_endpoint, methods=["POST"]),
-        Route("/debug-parse", debug_parse_endpoint, methods=["POST"]),
-        Route("/debug-processor", debug_processor_endpoint),
-        Route("/upload/{token}", token_upload_endpoint, methods=["POST"]),
-        Route("/result/{doc_id}", get_result_endpoint),
-        Route("/result-file/{doc_id}", get_result_file_endpoint),
-        Route("/widget/parser", widget_endpoint),
-        Route("/sse", endpoint=handle_sse),
-        Mount("/messages/", app=sse.handle_post_message),
-    ],
-    middleware=[
-        Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]),
-    ],
-)
+_mcp_app = mcp.streamable_http_app()
 
-_mcp_streamable_app = mcp.streamable_http_app()
+# Inject our custom routes into the MCP app's route list (before the /mcp catch-all)
+_custom_routes = [
+    Route("/", homepage),
+    Route("/favicon-32.png", favicon),
+    Route("/favicon.ico", favicon),
+    Route("/health", health),
+    Route("/parse", parse_endpoint, methods=["POST"]),
+    Route("/parse-url", parse_url_endpoint, methods=["POST"]),
+    Route("/parse-chatgpt", parse_chatgpt_endpoint, methods=["POST"]),
+    Route("/debug-parse", debug_parse_endpoint, methods=["POST"]),
+    Route("/debug-processor", debug_processor_endpoint),
+    Route("/upload/{token}", token_upload_endpoint, methods=["POST"]),
+    Route("/result/{doc_id}", get_result_endpoint),
+    Route("/result-file/{doc_id}", get_result_file_endpoint),
+    Route("/widget/parser", widget_endpoint),
+    Route("/sse", endpoint=handle_sse),
+    Mount("/messages/", app=sse.handle_post_message),
+]
+_mcp_app.router.routes = _custom_routes + list(_mcp_app.router.routes)
 
+# Add CORS middleware
+_mcp_app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-async def app(scope, receive, send):
-    """ASGI app that routes /mcp to the streamable HTTP transport
-    and everything else to the HTTP routes + SSE app."""
-    if scope["type"] == "lifespan":
-        # Forward lifespan to the streamable app (it needs initialization)
-        await _mcp_streamable_app(scope, receive, send)
-        return
-    path = scope.get("path", "")
-    if path == "/mcp" or path.startswith("/mcp/"):
-        await _mcp_streamable_app(scope, receive, send)
-    else:
-        await _http_routes_app(scope, receive, send)
+app = _mcp_app
 
 
 if __name__ == "__main__":
