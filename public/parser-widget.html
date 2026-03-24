@@ -5,56 +5,92 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>BW Document Parser</title>
 <style>
+  :root {
+    --bg: #ffffff;
+    --bg-card: #ffffff;
+    --bg-drop: #FAFBFD;
+    --bg-drop-hover: #F0F6FD;
+    --bg-result: #F7F9FB;
+    --border: #D6DEE8;
+    --border-drop: #B8C9DB;
+    --text: #1C2B5A;
+    --text-secondary: #6B7A8D;
+    --text-muted: #A3B0B8;
+    --accent: #0073E5;
+    --accent-hover: #005BB5;
+    --error: #C0392B;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #212121;
+      --bg-card: #2A2A2A;
+      --bg-drop: #303030;
+      --bg-drop-hover: #383838;
+      --bg-result: #333333;
+      --border: #444444;
+      --border-drop: #555555;
+      --text: #E8E8E8;
+      --text-secondary: #A0A0A0;
+      --text-muted: #777777;
+      --accent: #4DA3FF;
+      --accent-hover: #3B8DE0;
+      --error: #E74C3C;
+    }
+  }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; }
-  body { font-family: 'Avenir LT Std', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-         background: #fff; color: #1C2B5A; padding: 0; }
-  .card { border: 1px solid #D6DEE8; border-radius: 10px; padding: 20px 24px;
-          max-width: 480px; margin: 0 auto; }
-  .header { display: flex; align-items: center; gap: 10px; margin-bottom: 16px;
-            padding-bottom: 12px; border-bottom: 1px solid #EDF1F5; }
-  .header .logo { width: 6px; height: 24px; background: #0073E5; border-radius: 3px; }
-  .header .title { font-size: 13px; font-weight: 600; letter-spacing: 0.8px;
-                   color: #1C2B5A; text-transform: uppercase; }
-  .header .title span { color: #0073E5; }
-  .drop-zone { border: 1.5px dashed #B8C9DB; border-radius: 8px; padding: 32px 20px;
-               cursor: pointer; transition: all 0.15s; background: #FAFBFD;
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: var(--bg); color: var(--text); padding: 0; }
+  .card { border: 1px solid var(--border); border-radius: 10px; padding: 20px 24px;
+          max-width: 480px; margin: 0 auto; background: var(--bg-card); }
+  .header { display: flex; align-items: center; gap: 10px; margin-bottom: 14px;
+            padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+  .header .accent-bar { width: 4px; height: 20px; background: var(--accent); border-radius: 2px; }
+  .header .title { font-size: 13px; font-weight: 600; letter-spacing: 0.6px;
+                   color: var(--text); text-transform: uppercase; }
+  .header .title span { color: var(--accent); }
+  .drop-zone { border: 1.5px dashed var(--border-drop); border-radius: 8px; padding: 28px 20px;
+               cursor: pointer; transition: all 0.15s; background: var(--bg-drop);
                display: flex; flex-direction: column; align-items: center;
                justify-content: center; text-align: center; }
-  .drop-zone:hover, .drop-zone.drag-over { border-color: #0073E5; background: #F0F6FD; }
+  .drop-zone:hover, .drop-zone.drag-over { border-color: var(--accent); background: var(--bg-drop-hover); }
   .drop-zone input { display: none; }
-  .drop-zone .icon { font-size: 24px; margin-bottom: 6px; opacity: 0.5; }
-  .drop-zone p { color: #6B7A8D; font-size: 13px; }
-  .drop-zone .formats { font-size: 10px; color: #A3B0B8; margin-top: 3px;
+  .drop-zone .icon { font-size: 22px; margin-bottom: 4px; opacity: 0.45; }
+  .drop-zone p { color: var(--text-secondary); font-size: 13px; }
+  .drop-zone .formats { font-size: 10px; color: var(--text-muted); margin-top: 3px;
                         letter-spacing: 0.5px; text-transform: uppercase; }
-  #status { margin-top: 14px; }
-  .parsing { color: #0073E5; font-size: 13px; display: flex; align-items: center;
-             justify-content: center; gap: 8px; padding: 8px 0; }
-  .parsing .spinner { width: 14px; height: 14px; border: 2px solid #B8C9DB;
-                      border-top-color: #0073E5; border-radius: 50%;
-                      animation: spin 0.7s linear infinite; flex-shrink: 0; }
+  #status { margin-top: 12px; }
+  .parsing { color: var(--accent); font-size: 13px; display: flex; align-items: center;
+             justify-content: center; gap: 8px; padding: 6px 0; }
+  .spinner { width: 14px; height: 14px; border: 2px solid var(--border-drop);
+             border-top-color: var(--accent); border-radius: 50%;
+             animation: spin 0.7s linear infinite; flex-shrink: 0; }
   @keyframes spin { to { transform: rotate(360deg); } }
-  .result { background: #F7F9FB; border: 1px solid #D6DEE8; border-radius: 8px;
+  .result { background: var(--bg-result); border: 1px solid var(--border); border-radius: 8px;
             padding: 12px 14px; }
-  .result .meta { font-size: 13px; color: #1C2B5A; margin-bottom: 10px; line-height: 1.4; }
+  .result .meta { font-size: 13px; color: var(--text); margin-bottom: 10px; line-height: 1.4; }
   .result .meta strong { font-weight: 600; }
-  .result .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  .btn { display: inline-flex; align-items: center; gap: 5px; padding: 8px 14px;
+  .result .meta .detail { font-size: 12px; color: var(--text-secondary); }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 9px 16px;
          border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 500;
-         text-decoration: none; transition: all 0.15s; border: none; }
-  .btn-primary { background: #0073E5; color: #fff; }
-  .btn-primary:hover { background: #005BB5; }
-  .btn-secondary { background: #fff; color: #1C2B5A; border: 1px solid #D6DEE8; }
-  .btn-secondary:hover { background: #F0F6FD; border-color: #0073E5; }
-  .btn svg { width: 14px; height: 14px; fill: currentColor; }
-  .copied { font-size: 11px; color: #0073E5; font-weight: 500; }
-  .error { color: #C0392B; font-size: 12px; padding: 6px 0; }
+         text-decoration: none; transition: all 0.15s; border: none; white-space: nowrap; }
+  .btn svg { width: 14px; height: 14px; fill: currentColor; flex-shrink: 0; }
+  .btn-send { background: var(--accent); color: #fff; }
+  .btn-send:hover { background: var(--accent-hover); }
+  .btn-link { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  .btn-link:hover { background: var(--bg-drop-hover); }
+  .btn-reset { background: transparent; color: var(--text-secondary); border: 1px solid var(--border); }
+  .btn-reset:hover { background: var(--bg-drop); }
+  .btn.done { opacity: 0.7; cursor: default; }
+  .error { color: var(--error); font-size: 12px; padding: 6px 0; }
+  .toast { font-size: 11px; color: var(--accent); font-weight: 500; margin-top: 6px; }
 </style>
 </head>
 <body>
 <div class="card">
   <div class="header">
-    <div class="logo"></div>
+    <div class="accent-bar"></div>
     <div class="title"><span>Bellwether</span> Document Parser</div>
   </div>
   <div class="drop-zone" id="dropZone">
@@ -70,23 +106,6 @@ const SERVER_URL = 'https://bw-parse-mcp-server.up.railway.app';
 const dropZone = document.getElementById('dropZone');
 const fileInput = document.getElementById('fileInput');
 const status = document.getElementById('status');
-
-// JSON-RPC helper to call MCP tools via the ChatGPT bridge
-function rpcRequest(method, params) {
-  return new Promise((resolve, reject) => {
-    const id = Math.random().toString(36).slice(2);
-    const listener = (event) => {
-      if (event.source !== window.parent) return;
-      const msg = event.data;
-      if (!msg || msg.id !== id) return;
-      window.removeEventListener('message', listener);
-      if (msg.error) reject(new Error(msg.error.message || 'RPC error'));
-      else resolve(msg.result);
-    };
-    window.addEventListener('message', listener);
-    window.parent.postMessage({ jsonrpc: '2.0', method, params, id }, '*');
-  });
-}
 
 function notifyHeight() {
   try {
@@ -123,34 +142,62 @@ async function handleFile(file) {
 }
 
 function showSuccess(data, filename) {
-  const resultUrl = SERVER_URL + '/result-file/' + data.document_id;
   const baseName = filename.replace(/\.[^.]+$/, '');
+  const dlUrl = SERVER_URL + '/download/' + data.document_id;
   status.innerHTML = `
     <div class="result">
-      <div class="meta"><strong>${data.filename || filename}</strong><br>${data.pages} page${data.pages !== 1 ? 's' : ''} &middot; ${Number(data.chars).toLocaleString()} characters extracted</div>
-      <div class="actions">
-        <button class="btn btn-primary" id="dlBtn">
-          <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
-          Get download link
-        </button>
-        <button class="btn btn-secondary" id="newBtn">Parse another</button>
+      <div class="meta">
+        <strong>${data.filename || filename}</strong>
+        <div class="detail">${data.pages} page${data.pages !== 1 ? 's' : ''} &middot; ${Number(data.chars).toLocaleString()} characters</div>
       </div>
+      <div class="actions">
+        <button class="btn btn-send" id="sendBtn">
+          <svg viewBox="0 0 24 24"><path d="M3.4 20.4l17.45-7.48a1 1 0 000-1.84L3.4 3.6a.993.993 0 00-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87 1l.01 4.61c0 .71.73 1.2 1.39.91z"/></svg>
+          Send to chat
+        </button>
+        <button class="btn btn-link" id="linkBtn">
+          <svg viewBox="0 0 24 24"><path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/></svg>
+          Copy link
+        </button>
+        <button class="btn btn-reset" id="newBtn">
+          Parse another
+        </button>
+      </div>
+      <div id="toast"></div>
     </div>`;
-  const dlUrl = SERVER_URL + '/download/' + data.document_id;
-  document.getElementById('dlBtn').addEventListener('click', () => {
-    window.parent.postMessage({
-      jsonrpc: '2.0',
-      method: 'ui/message',
-      id: Math.random().toString(36).slice(2),
-      params: {
-        role: 'user',
-        content: [
-          { type: 'text', text: 'Download the parsed document here: ' + dlUrl }
-        ],
-      }
-    }, '*');
-    document.getElementById('dlBtn').innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"/></svg> Link sent';
+
+  // Send to chat — posts full parsed text as a user message
+  document.getElementById('sendBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('sendBtn');
+    btn.innerHTML = '<div class="spinner"></div> Sending...';
+    try {
+      const r = await fetch(SERVER_URL + '/result/' + data.document_id);
+      const text = await r.text();
+      window.parent.postMessage({
+        jsonrpc: '2.0',
+        method: 'ui/message',
+        id: Math.random().toString(36).slice(2),
+        params: {
+          role: 'user',
+          content: [{ type: 'text', text: 'Here is the full parsed OCR output for ' + (data.filename || filename) + ' (' + data.pages + ' pages). Create a downloadable .md file with this exact content:\n\n' + text }],
+        }
+      }, '*');
+      btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"/></svg> Sent';
+      btn.classList.add('done');
+    } catch (e) {
+      btn.textContent = 'Failed';
+    }
   });
+
+  // Copy download link
+  document.getElementById('linkBtn').addEventListener('click', () => {
+    navigator.clipboard.writeText(dlUrl).then(() => {
+      document.getElementById('toast').innerHTML = '<div class="toast">Link copied to clipboard</div>';
+      setTimeout(() => { const t = document.getElementById('toast'); if (t) t.innerHTML = ''; }, 2500);
+    });
+  });
+
+  // Parse another
   document.getElementById('newBtn').addEventListener('click', () => {
     status.innerHTML = '';
     fileInput.value = '';
