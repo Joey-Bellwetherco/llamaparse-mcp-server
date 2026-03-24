@@ -430,8 +430,7 @@ mcp = FastMCP("BW Document OCR")
 
 
 # --- ChatGPT MCP instance (streamable HTTP at /mcp) ---
-_WIDGET_VERSION = "2"
-_WIDGET_URI = f"ui://widget/parser.html?v={_WIDGET_VERSION}"
+_WIDGET_URI = f"ui://widget/parser.html?v={int(time.time())}"
 import mcp.types as mcp_types
 
 mcp_chatgpt = FastMCP(
