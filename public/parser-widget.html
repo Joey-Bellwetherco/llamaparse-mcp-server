@@ -163,38 +163,18 @@ function showSuccess(data, filename) {
       <div id="toast"></div>
     </div>`;
 
-  // Send to chat — for small docs, send text; for large docs, send download link
-  document.getElementById('sendBtn').addEventListener('click', async () => {
+  // Send to chat — always send download link, never the full text
+  document.getElementById('sendBtn').addEventListener('click', () => {
     const btn = document.getElementById('sendBtn');
-    const chars = data.chars || 0;
-    if (chars > 40000) {
-      // Large doc — just send the download link
-      window.parent.postMessage({
-        jsonrpc: '2.0', method: 'ui/message',
-        id: Math.random().toString(36).slice(2),
-        params: { role: 'user', content: [
-          { type: 'text', text: 'The parsed document ' + (data.filename || filename) + ' (' + data.pages + ' pages, ' + Number(chars).toLocaleString() + ' chars) is ready.\n\nDownload: ' + dlUrl }
-        ]}
-      }, '*');
-      btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"/></svg> Sent';
-      btn.classList.add('done');
-    } else {
-      // Small doc — send full text
-      btn.innerHTML = '<div class="spinner"></div> Sending...';
-      try {
-        const r = await fetch(SERVER_URL + '/result/' + data.document_id);
-        const text = await r.text();
-        window.parent.postMessage({
-          jsonrpc: '2.0', method: 'ui/message',
-          id: Math.random().toString(36).slice(2),
-          params: { role: 'user', content: [
-            { type: 'text', text: 'Here is the parsed document ' + (data.filename || filename) + ' (' + data.pages + ' pages):\n\n' + text }
-          ]}
-        }, '*');
-        btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"/></svg> Sent';
-        btn.classList.add('done');
-      } catch (e) { btn.textContent = 'Failed'; }
-    }
+    window.parent.postMessage({
+      jsonrpc: '2.0', method: 'ui/message',
+      id: Math.random().toString(36).slice(2),
+      params: { role: 'user', content: [
+        { type: 'text', text: 'Parsed: ' + (data.filename || filename) + ' (' + data.pages + ' pages, ' + Number(data.chars || 0).toLocaleString() + ' chars)\n\nDownload the markdown file: ' + dlUrl }
+      ]}
+    }, '*');
+    btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"/></svg> Sent';
+    btn.classList.add('done');
   });
 
   // Copy download link — with fallback for sandboxed iframes
