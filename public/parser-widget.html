@@ -131,24 +131,25 @@ function showSuccess(data, filename) {
       <div class="actions">
         <button class="btn btn-primary" id="dlBtn">
           <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
-          Send to chat
+          Get download link
         </button>
         <button class="btn btn-secondary" id="newBtn">Parse another</button>
       </div>
     </div>`;
-  document.getElementById('dlBtn').addEventListener('click', async () => {
-    const btn = document.getElementById('dlBtn');
-    btn.textContent = 'Getting file...';
-    try {
-      // Call the get_parsed_file tool via MCP bridge to return file to ChatGPT
-      const result = await rpcRequest('tools/call', {
-        name: 'get_parsed_file',
-        arguments: { document_id: data.document_id },
-      });
-      btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"/></svg> File ready';
-    } catch (e) {
-      btn.textContent = 'Failed: ' + e.message;
-    }
+  const dlUrl = SERVER_URL + '/download/' + data.document_id;
+  document.getElementById('dlBtn').addEventListener('click', () => {
+    window.parent.postMessage({
+      jsonrpc: '2.0',
+      method: 'ui/message',
+      id: Math.random().toString(36).slice(2),
+      params: {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Download the parsed document here: ' + dlUrl }
+        ],
+      }
+    }, '*');
+    document.getElementById('dlBtn').innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"/></svg> Link sent';
   });
   document.getElementById('newBtn').addEventListener('click', () => {
     status.innerHTML = '';
