@@ -123,21 +123,18 @@ function showSuccess(data, filename) {
     const btn = document.getElementById('dlBtn');
     btn.textContent = 'Sending to chat...';
     try {
-      // Fetch the parsed text and send it back to ChatGPT as a tool result
       const r = await fetch(SERVER_URL + '/result/' + data.document_id);
       const text = await r.text();
+      // Send parsed text as a message into the ChatGPT conversation
       window.parent.postMessage({
         jsonrpc: '2.0',
-        method: 'ui/notifications/tool-result',
+        method: 'ui/message',
+        id: Math.random().toString(36).slice(2),
         params: {
-          structuredContent: {
-            document_id: data.document_id,
-            filename: data.filename || filename,
-            pages: data.pages,
-            chars: data.chars,
-            text: text,
-          },
-          content: text,
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Here is the parsed document (' + (data.filename || filename) + ', ' + data.pages + ' pages):\n\n' + text }
+          ],
         }
       }, '*');
       btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"/></svg> Sent to chat';
