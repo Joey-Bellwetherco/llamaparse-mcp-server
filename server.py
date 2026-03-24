@@ -440,7 +440,7 @@ mcp_chatgpt = FastMCP(
 
 
 @mcp_chatgpt.resource(_WIDGET_URI, name="parser-widget", mime_type="text/html",
-                       description="Document OCR upload widget — drag and drop PDFs to parse with Mistral OCR")
+                       description="Bellwether Document Parser — drag and drop PDFs to extract text")
 def get_parser_widget():
     widget_path = os.path.join(os.path.dirname(__file__), "public", "parser-widget.html")
     with open(widget_path, "r", encoding="utf-8") as f:
@@ -450,17 +450,17 @@ def get_parser_widget():
 @mcp_chatgpt.tool(
     meta={
         "openai/outputTemplate": _WIDGET_URI,
-        "openai/toolInvocation/invoking": "Opening document parser...",
+        "openai/toolInvocation/invoking": "Opening Bellwether Document Parser...",
         "openai/toolInvocation/invoked": "Parser ready — drop a file to parse",
     },
 )
 async def upload_and_parse() -> str:
-    """Upload and parse a PDF document with Mistral OCR.
+    """Upload and parse a PDF or image document.
 
-    Use this when the user wants to parse a PDF or image. Opens the upload widget
-    where they can drag and drop files.
+    Use this when the user wants to parse, OCR, or extract text from a document.
+    Opens the Bellwether Document Parser where they can drag and drop files.
     """
-    return "Upload widget ready. Drag and drop a PDF to parse with Mistral OCR."
+    return "Bellwether Document Parser ready. Drag and drop a file to extract text."
 
 
 @mcp.tool()
