@@ -672,7 +672,6 @@ async def get_download_link(
     )
 
 
-@mcp.tool()
 async def list_documents() -> str:
     """List all documents that have been parsed and are available in the cache.
 
@@ -813,7 +812,6 @@ async def parse_document_from_url(
 UPLOAD_URL = os.environ.get("PUBLIC_URL", "https://bw-parse-mcp-server.up.railway.app")
 
 
-@mcp.tool()
 async def check_status() -> str:
     """Check parser status and see what documents have been parsed.
 
