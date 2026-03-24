@@ -1306,7 +1306,12 @@ async def widget_endpoint(request):
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 
-app = Starlette(
+
+# --- Combined app: HTTP routes + SSE (Claude) + Streamable HTTP (ChatGPT) ---
+# The streamable HTTP app from FastMCP handles /mcp for ChatGPT Apps.
+# We compose it with our custom routes using a path-dispatching ASGI app.
+
+_http_routes_app = Starlette(
     routes=[
         Route("/", homepage),
         Route("/favicon-32.png", favicon),
@@ -1329,6 +1334,23 @@ app = Starlette(
     ],
 )
 
+_mcp_streamable_app = mcp.streamable_http_app()
+
+
+async def app(scope, receive, send):
+    """ASGI app that routes /mcp to the streamable HTTP transport
+    and everything else to the HTTP routes + SSE app."""
+    if scope["type"] == "lifespan":
+        # Forward lifespan to the streamable app (it needs initialization)
+        await _mcp_streamable_app(scope, receive, send)
+        return
+    path = scope.get("path", "")
+    if path == "/mcp" or path.startswith("/mcp/"):
+        await _mcp_streamable_app(scope, receive, send)
+    else:
+        await _http_routes_app(scope, receive, send)
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run("server:app", host="0.0.0.0", port=port)
