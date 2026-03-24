@@ -427,7 +427,10 @@ mcp = FastMCP("BW Document OCR")
 
 
 # Register the widget as an MCP App resource for ChatGPT iframe rendering
-@mcp.resource("ui://widget/parser.html", name="parser-widget", mime_type="text/html",
+_WIDGET_URI = "ui://widget/parser.html"
+
+
+@mcp.resource(_WIDGET_URI, name="parser-widget", mime_type="text/html",
               description="Document OCR upload widget — drag and drop PDFs to parse with Mistral OCR")
 def get_parser_widget():
     widget_path = os.path.join(os.path.dirname(__file__), "public", "parser-widget.html")
@@ -1292,6 +1295,7 @@ app = Starlette(
         Route("/widget/parser", widget_endpoint),
         Route("/sse", endpoint=handle_sse),
         Mount("/messages/", app=sse.handle_post_message),
+        Mount("/mcp", app=mcp.streamable_http_app()),
     ],
     middleware=[
         Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]),
