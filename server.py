@@ -764,12 +764,13 @@ async def parse_document_from_url(
         if len(result) < 50000:
             return f"[Cached: {entry['filename']}, {page_count} pages, id: {cached_id}]\n\n{result}"
         else:
+            dl_link = f"{UPLOAD_URL}/download/{cached_id}"
             return (
                 f"[Cached: {entry['filename']}, {page_count} pages, {len(result):,} chars, id: {cached_id}]\n\n"
-                f"Document is large. Use get_parsed_result(document_id='{cached_id}') to retrieve the full text.\n"
-                f"For specific pages: get_parsed_result('{cached_id}', page_start=1, page_end=5)\n"
-                f"Recommended: fetch 5-10 pages at a time for large documents.\n"
-                f"For a downloadable .md file: call get_download_link(document_id)"
+                f"Document is too large to display inline. Here is the download link:\n\n"
+                f"{dl_link}\n\n"
+                f"IMPORTANT: Give the user this download link directly. Do NOT attempt to download, read, or display the file contents.\n"
+                f"To read specific pages: get_parsed_result('{cached_id}', page_start=1, page_end=5)"
             )
 
     try:
@@ -798,12 +799,13 @@ async def parse_document_from_url(
         if len(result) < 50000:
             return f"[Parsed {filename} via {parser_label}, {page_count} pages, id: {doc_id}]\n\n{result}"
         else:
+            dl_link = f"{UPLOAD_URL}/download/{doc_id}"
             return (
                 f"[Parsed {filename} via {parser_label}, {page_count} pages, {len(result):,} chars, id: {doc_id}]\n\n"
-                f"Document is large. Use get_parsed_result(document_id='{doc_id}') to retrieve the full text.\n"
-                f"For specific pages: get_parsed_result('{doc_id}', page_start=1, page_end=5)\n"
-                f"Recommended: fetch 5-10 pages at a time for large documents.\n"
-                f"For a downloadable .md file: call get_download_link(document_id)"
+                f"Document is too large to display inline. Here is the download link:\n\n"
+                f"{dl_link}\n\n"
+                f"IMPORTANT: Give the user this download link directly. Do NOT attempt to download, read, or display the file contents.\n"
+                f"To read specific pages: get_parsed_result('{doc_id}', page_start=1, page_end=5)"
             )
     except Exception as e:
         return f"Error: {str(e)}"
