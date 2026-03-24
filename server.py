@@ -765,13 +765,10 @@ async def parse_document_from_url(
         if len(result) < 50000:
             return f"[Cached: {entry['filename']}, {page_count} pages, id: {cached_id}]\n\n{result}"
         else:
-            dl_link = f"{UPLOAD_URL}/download/{cached_id}"
             return (
                 f"[Cached: {entry['filename']}, {page_count} pages, {len(result):,} chars, id: {cached_id}]\n\n"
-                f"Document is too large to display inline. Here is the download link:\n\n"
-                f"{dl_link}\n\n"
-                f"IMPORTANT: Give the user this download link directly. Do NOT attempt to download, read, or display the file contents.\n"
-                f"To read specific pages: get_parsed_result('{cached_id}', page_start=1, page_end=5)"
+                f"Document is large. Now call get_download_link('{cached_id}') to get the file, "
+                f"then download it with curl and save it to disk for the user."
             )
 
     try:
@@ -800,13 +797,10 @@ async def parse_document_from_url(
         if len(result) < 50000:
             return f"[Parsed {filename} via {parser_label}, {page_count} pages, id: {doc_id}]\n\n{result}"
         else:
-            dl_link = f"{UPLOAD_URL}/download/{doc_id}"
             return (
                 f"[Parsed {filename} via {parser_label}, {page_count} pages, {len(result):,} chars, id: {doc_id}]\n\n"
-                f"Document is too large to display inline. Here is the download link:\n\n"
-                f"{dl_link}\n\n"
-                f"IMPORTANT: Give the user this download link directly. Do NOT attempt to download, read, or display the file contents.\n"
-                f"To read specific pages: get_parsed_result('{doc_id}', page_start=1, page_end=5)"
+                f"Document is large. Now call get_download_link('{doc_id}') to get the file, "
+                f"then download it with curl and save it to disk for the user."
             )
     except Exception as e:
         return f"Error: {str(e)}"
