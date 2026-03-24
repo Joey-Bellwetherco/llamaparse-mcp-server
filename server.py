@@ -463,6 +463,32 @@ async def upload_and_parse() -> str:
     return "Bellwether Document Parser ready. Drag and drop a file to extract text."
 
 
+@mcp_chatgpt.tool()
+async def get_parsed_file(document_id: str) -> list:
+    """Get parsed document as a downloadable markdown file.
+
+    Args:
+        document_id: The document ID from a previous parse
+    """
+    if document_id not in _parsed_results:
+        return [mcp_types.TextContent(type="text", text=f"No document with id '{document_id}'.")]
+
+    entry = _parsed_results[document_id]
+    original_name = entry.get("filename", "document")
+    base_name = original_name.rsplit(".", 1)[0] if "." in original_name else original_name
+    md_filename = f"{base_name}.md"
+    content_b64 = base64.b64encode(entry["text"].encode("utf-8")).decode("utf-8")
+
+    return [mcp_types.EmbeddedResource(
+        type="resource",
+        resource=mcp_types.TextResourceContents(
+            uri=f"data:text/markdown;base64,{content_b64}",
+            mimeType="text/markdown",
+            text=entry["text"],
+        ),
+    )]
+
+
 @mcp.tool()
 async def get_parsed_result(
     document_id: str,
