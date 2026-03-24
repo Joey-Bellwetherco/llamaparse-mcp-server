@@ -1255,33 +1255,6 @@ async def parse_url_endpoint(request: Request):
     })
 
 
-async def oauth_protected_resource(request):
-    return JSONResponse({
-        "resource": f"https://{request.headers.get('host', 'localhost')}",
-        "bearer_methods_supported": [],
-        "resource_documentation": "https://github.com/Joey-Bellwetherco/llamaparse-mcp-server",
-    })
-
-
-async def oauth_authorization_server(request):
-    return JSONResponse({
-        "issuer": f"https://{request.headers.get('host', 'localhost')}",
-        "authorization_endpoint": f"https://{request.headers.get('host', 'localhost')}/authorize",
-        "token_endpoint": f"https://{request.headers.get('host', 'localhost')}/token",
-        "response_types_supported": ["code"],
-    })
-
-
-async def register(request):
-    body = await request.json()
-    return JSONResponse({
-        "client_id": "docai-public-client",
-        "client_secret": "",
-        "client_name": body.get("client_name", "Claude"),
-        "redirect_uris": body.get("redirect_uris", []),
-    })
-
-
 async def widget_endpoint(request):
     """Serve the ChatGPT App widget HTML."""
     widget_path = os.path.join(os.path.dirname(__file__), "public", "parser-widget.html")
@@ -1310,9 +1283,6 @@ app = Starlette(
         Route("/widget/parser", widget_endpoint),
         Route("/sse", endpoint=handle_sse),
         Mount("/messages/", app=sse.handle_post_message),
-        Route("/.well-known/oauth-protected-resource", oauth_protected_resource),
-        Route("/.well-known/oauth-authorization-server", oauth_authorization_server),
-        Route("/register", register, methods=["POST"]),
     ],
     middleware=[
         Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]),
