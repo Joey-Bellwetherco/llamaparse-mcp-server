@@ -119,26 +119,9 @@ function showSuccess(data, filename) {
         <button class="btn btn-secondary" id="newBtn">Parse another</button>
       </div>
     </div>`;
-  document.getElementById('dlBtn').addEventListener('click', async () => {
-    const btn = document.getElementById('dlBtn');
-    btn.textContent = 'Downloading...';
-    try {
-      const r = await fetch(resultUrl);
-      const json = await r.json();
-      const file = json.openaiFileResponse[0];
-      const bytes = atob(file.content);
-      const blob = new Blob([bytes], { type: 'text/markdown' });
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = baseName + '.md';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(a.href);
-      btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"/></svg> Downloaded';
-    } catch (e) {
-      btn.textContent = 'Download failed';
-    }
+  const downloadUrl = SERVER_URL + '/download/' + data.document_id;
+  document.getElementById('dlBtn').addEventListener('click', () => {
+    window.location.href = downloadUrl;
   });
   document.getElementById('newBtn').addEventListener('click', () => {
     status.innerHTML = '';
