@@ -159,50 +159,69 @@ function showSuccess(data, filename) {
           <svg viewBox="0 0 24 24"><path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/></svg>
           Copy link
         </button>
-        <button class="btn btn-reset" id="newBtn">
-          Parse another
-        </button>
       </div>
       <div id="toast"></div>
     </div>`;
 
-  // Send to chat — posts full parsed text as a user message
+  // Send to chat — for small docs, send text; for large docs, send download link
   document.getElementById('sendBtn').addEventListener('click', async () => {
     const btn = document.getElementById('sendBtn');
-    btn.innerHTML = '<div class="spinner"></div> Sending...';
-    try {
-      const r = await fetch(SERVER_URL + '/result/' + data.document_id);
-      const text = await r.text();
+    const chars = data.chars || 0;
+    if (chars > 40000) {
+      // Large doc — just send the download link
       window.parent.postMessage({
-        jsonrpc: '2.0',
-        method: 'ui/message',
+        jsonrpc: '2.0', method: 'ui/message',
         id: Math.random().toString(36).slice(2),
-        params: {
-          role: 'user',
-          content: [{ type: 'text', text: 'Here is the full parsed OCR output for ' + (data.filename || filename) + ' (' + data.pages + ' pages). Create a downloadable .md file with this exact content:\n\n' + text }],
-        }
+        params: { role: 'user', content: [
+          { type: 'text', text: 'The parsed document ' + (data.filename || filename) + ' (' + data.pages + ' pages, ' + Number(chars).toLocaleString() + ' chars) is ready.\n\nDownload: ' + dlUrl }
+        ]}
       }, '*');
       btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"/></svg> Sent';
       btn.classList.add('done');
-    } catch (e) {
-      btn.textContent = 'Failed';
+    } else {
+      // Small doc — send full text
+      btn.innerHTML = '<div class="spinner"></div> Sending...';
+      try {
+        const r = await fetch(SERVER_URL + '/result/' + data.document_id);
+        const text = await r.text();
+        window.parent.postMessage({
+          jsonrpc: '2.0', method: 'ui/message',
+          id: Math.random().toString(36).slice(2),
+          params: { role: 'user', content: [
+            { type: 'text', text: 'Here is the parsed document ' + (data.filename || filename) + ' (' + data.pages + ' pages):\n\n' + text }
+          ]}
+        }, '*');
+        btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"/></svg> Sent';
+        btn.classList.add('done');
+      } catch (e) { btn.textContent = 'Failed'; }
     }
   });
 
-  // Copy download link
+  // Copy download link — with fallback for sandboxed iframes
   document.getElementById('linkBtn').addEventListener('click', () => {
-    navigator.clipboard.writeText(dlUrl).then(() => {
+    function copyFallback(text) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.cssText = 'position:fixed;left:-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(dlUrl).then(showCopied).catch(() => { copyFallback(dlUrl); showCopied(); });
+      } else {
+        copyFallback(dlUrl);
+        showCopied();
+      }
+    } catch (e) { copyFallback(dlUrl); showCopied(); }
+    function showCopied() {
       document.getElementById('toast').innerHTML = '<div class="toast">Link copied to clipboard</div>';
       setTimeout(() => { const t = document.getElementById('toast'); if (t) t.innerHTML = ''; }, 2500);
-    });
+    }
   });
 
-  // Parse another
-  document.getElementById('newBtn').addEventListener('click', () => {
-    status.innerHTML = '';
-    fileInput.value = '';
-    notifyHeight();
-  });
   notifyHeight();
 }
 
