@@ -440,44 +440,14 @@ mcp_chatgpt = FastMCP(
 
 
 _WIDGET_DOMAIN = "https://bw-parse-mcp-server.up.railway.app"
-_WIDGET_CSP = {
-    "default-src": "'self'",
-    "connect-src": f"'self' {_WIDGET_DOMAIN}",
-    "script-src": "'unsafe-inline'",
-    "style-src": "'unsafe-inline'",
-}
 
 
-# Register widget resource with CSP and domain via low-level handlers
-@mcp_chatgpt._mcp_server.list_resources()
-async def _list_widget_resources():
-    return [mcp_types.Resource(
-        uri=_WIDGET_URI,
-        name="parser-widget",
-        description="Bellwether Document Parser — drag and drop PDFs to extract text",
-        mimeType="text/html+skybridge",
-    )]
-
-
-@mcp_chatgpt._mcp_server.read_resource()
-async def _read_widget_resource(uri):
-    if str(uri) == _WIDGET_URI:
-        widget_path = os.path.join(os.path.dirname(__file__), "public", "parser-widget.html")
-        with open(widget_path, "r", encoding="utf-8") as f:
-            html = f.read()
-        return [mcp_types.ReadResourceContents(
-            uri=_WIDGET_URI,
-            mimeType="text/html+skybridge",
-            text=html,
-            _meta={
-                "ui": {
-                    "domain": _WIDGET_DOMAIN,
-                    "csp": _WIDGET_CSP,
-                    "prefersBorder": True,
-                },
-            },
-        )]
-    raise ValueError(f"Unknown resource: {uri}")
+@mcp_chatgpt.resource(_WIDGET_URI, name="parser-widget", mime_type="text/html",
+                       description="Bellwether Document Parser — drag and drop PDFs to extract text")
+def get_parser_widget():
+    widget_path = os.path.join(os.path.dirname(__file__), "public", "parser-widget.html")
+    with open(widget_path, "r", encoding="utf-8") as f:
+        return f.read()
 
 
 @mcp_chatgpt.tool(
@@ -485,6 +455,16 @@ async def _read_widget_resource(uri):
         "openai/outputTemplate": _WIDGET_URI,
         "openai/toolInvocation/invoking": "Opening Bellwether Document Parser...",
         "openai/toolInvocation/invoked": "Parser ready — drop a file to parse",
+        "ui": {
+            "domain": _WIDGET_DOMAIN,
+            "csp": {
+                "default-src": "'self'",
+                "connect-src": f"'self' {_WIDGET_DOMAIN}",
+                "script-src": "'unsafe-inline'",
+                "style-src": "'unsafe-inline'",
+            },
+            "prefersBorder": True,
+        },
     },
 )
 async def upload_and_parse() -> str:
