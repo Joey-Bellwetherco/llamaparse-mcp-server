@@ -570,19 +570,10 @@ async def list_documents() -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
 async def get_upload_url(
     filename: str = "document.pdf",
 ) -> str:
-    """Get a one-time upload URL for parsing a PDF or image file.
-
-    Use this when the user wants to parse a local file. Returns a URL they can
-    upload to (via browser or curl). After upload, use get_parsed_result with the
-    returned document_id.
-
-    Args:
-        filename: Name of the file being uploaded
-    """
+    """Internal: generate a one-time upload URL. Used by the web UI, not exposed as MCP tool."""
     # Clean expired tokens
     now = time.time()
     expired = [t for t, v in _upload_tokens.items() if now - v["created"] > UPLOAD_TOKEN_TTL]
