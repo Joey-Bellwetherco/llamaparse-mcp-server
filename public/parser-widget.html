@@ -129,32 +129,61 @@ async function handleFile(file) {
   notifyHeight();
 
   try {
-    // Upload file via OpenAI's API, get a download URL, then parse via MCP bridge
     if (window.openai && window.openai.uploadFile) {
-      const uploadResult = await window.openai.uploadFile(file);
-      const dlResult = await window.openai.getFileDownloadUrl({ fileId: uploadResult.fileId });
-      const fileUrl = dlResult.url || dlResult.download_url || dlResult;
-      // Call our server-side parse tool via MCP bridge
-      const result = await rpcRequest('tools/call', {
-        name: 'parse_from_url',
-        arguments: { url: fileUrl },
-      });
-      // Parse the result — it's JSON inside the tool response
+      // Step 1: Upload to OpenAI
+      let uploadResult;
+      try {
+        uploadResult = await window.openai.uploadFile(file);
+      } catch (e) {
+        showError('Upload failed: ' + e.message);
+        return;
+      }
+
+      // Step 2: Get download URL
+      let fileUrl;
+      try {
+        const dlResult = await window.openai.getFileDownloadUrl({ fileId: uploadResult.fileId });
+        fileUrl = dlResult.url || dlResult.download_url || (typeof dlResult === 'string' ? dlResult : null);
+      } catch (e) {
+        showError('Get URL failed: ' + e.message);
+        return;
+      }
+
+      if (!fileUrl) {
+        showError('No download URL returned from OpenAI');
+        return;
+      }
+
+      // Step 3: Parse via MCP bridge
+      let result;
+      try {
+        result = await rpcRequest('tools/call', {
+          name: 'parse_from_url',
+          arguments: { url: fileUrl },
+        });
+      } catch (e) {
+        showError('Parse tool call failed: ' + e.message);
+        return;
+      }
+
+      // Step 4: Extract result
       let data;
       if (result && result.content) {
         const textItem = result.content.find(c => c.type === 'text');
-        if (textItem) data = JSON.parse(textItem.text);
+        if (textItem) {
+          try { data = JSON.parse(textItem.text); } catch (e) { data = null; }
+        }
       }
       if (data && data.document_id) {
         showSuccess(data, file.name);
       } else {
-        showError('Parse failed — no result returned');
+        showError('Parse returned no result. Raw: ' + JSON.stringify(result).slice(0, 200));
       }
     } else {
-      showError('File upload not available in this environment. Use the web UI at ' + SERVER_URL);
+      showError('OpenAI file API not available (window.openai=' + typeof window.openai + ')');
     }
   } catch (e) {
-    showError(e.message);
+    showError('Unexpected: ' + e.message);
   }
 }
 
