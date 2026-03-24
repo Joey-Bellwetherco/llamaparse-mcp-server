@@ -150,7 +150,7 @@ async function handleFile(file) {
       }
 
       if (!fileUrl) {
-        showError('No download URL returned from OpenAI');
+        showError('No download URL returned. Response: ' + JSON.stringify(dlResult).slice(0, 300));
         return;
       }
 
