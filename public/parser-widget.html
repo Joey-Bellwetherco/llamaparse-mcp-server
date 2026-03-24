@@ -129,13 +129,30 @@ async function handleFile(file) {
   notifyHeight();
 
   try {
-    const form = new FormData();
-    form.append('file', file);
-    const resp = await fetch(SERVER_URL + '/parse?parser=mistral', { method: 'POST', body: form });
-    if (!resp.ok) { showError('Server returned ' + resp.status); return; }
-    const data = await resp.json();
-    if (data.error) { showError(data.error); return; }
-    showSuccess(data, file.name);
+    // Upload file via OpenAI's API, get a download URL, then parse via MCP bridge
+    if (window.openai && window.openai.uploadFile) {
+      const uploadResult = await window.openai.uploadFile(file);
+      const dlResult = await window.openai.getFileDownloadUrl({ fileId: uploadResult.fileId });
+      const fileUrl = dlResult.url || dlResult.download_url || dlResult;
+      // Call our server-side parse tool via MCP bridge
+      const result = await rpcRequest('tools/call', {
+        name: 'parse_from_url',
+        arguments: { url: fileUrl },
+      });
+      // Parse the result — it's JSON inside the tool response
+      let data;
+      if (result && result.content) {
+        const textItem = result.content.find(c => c.type === 'text');
+        if (textItem) data = JSON.parse(textItem.text);
+      }
+      if (data && data.document_id) {
+        showSuccess(data, file.name);
+      } else {
+        showError('Parse failed — no result returned');
+      }
+    } else {
+      showError('File upload not available in this environment. Use the web UI at ' + SERVER_URL);
+    }
   } catch (e) {
     showError(e.message);
   }

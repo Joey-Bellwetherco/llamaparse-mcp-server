@@ -464,6 +464,52 @@ async def upload_and_parse() -> str:
 
 
 @mcp_chatgpt.tool()
+async def parse_from_url(url: str) -> str:
+    """Parse a document from a URL using OCR.
+
+    Args:
+        url: Direct URL to the document file
+    """
+    if not MISTRAL_API_KEY:
+        return "Error: No Mistral API key configured."
+    try:
+        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            file_bytes = resp.content
+    except Exception as e:
+        return f"Error downloading: {str(e)}"
+
+    filename = url.split("/")[-1].split("?")[0] or "document.pdf"
+    mime_type = "application/pdf"
+    lower = url.lower().split("?")[0]
+    if lower.endswith(".png"): mime_type = "image/png"
+    elif lower.endswith((".jpg", ".jpeg")): mime_type = "image/jpeg"
+
+    cached_id = _check_cache(file_bytes)
+    if cached_id:
+        entry = _parsed_results[cached_id]
+        return json.dumps({"document_id": cached_id, "filename": entry["filename"], "pages": entry["pages"], "chars": len(entry["text"])})
+
+    try:
+        result = await _process_document_mistral(file_bytes, mime_type)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+    page_count = 1
+    if mime_type == "application/pdf":
+        try:
+            reader = PdfReader(io.BytesIO(file_bytes))
+            page_count = len(reader.pages)
+        except Exception:
+            pass
+
+    doc_id = str(uuid.uuid4())[:8]
+    _store_result(doc_id, file_bytes, result, page_count, filename)
+    return json.dumps({"document_id": doc_id, "filename": filename, "pages": page_count, "chars": len(result)})
+
+
+@mcp_chatgpt.tool()
 async def get_parsed_file(document_id: str) -> list:
     """Get parsed document as a downloadable markdown file.
 
