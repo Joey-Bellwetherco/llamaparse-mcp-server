@@ -107,6 +107,21 @@ const dropZone = document.getElementById('dropZone');
 const fileInput = document.getElementById('fileInput');
 const status = document.getElementById('status');
 
+const _rpcCallbacks = {};
+function rpcRequest(method, params) {
+  return new Promise((resolve, reject) => {
+    const id = Math.random().toString(36).slice(2);
+    _rpcCallbacks[id] = { resolve, reject };
+    window.parent.postMessage({ jsonrpc: '2.0', id, method, params }, '*');
+    setTimeout(() => {
+      if (_rpcCallbacks[id]) {
+        delete _rpcCallbacks[id];
+        reject(new Error('MCP request timed out'));
+      }
+    }, 120000);
+  });
+}
+
 function notifyHeight() {
   try {
     if (window.openai && window.openai.notifyIntrinsicHeight) {
@@ -246,6 +261,14 @@ window.addEventListener('message', (event) => {
   if (event.source !== window.parent) return;
   const msg = event.data;
   if (!msg || msg.jsonrpc !== '2.0') return;
+  // Handle RPC responses
+  if (msg.id && _rpcCallbacks[msg.id]) {
+    const cb = _rpcCallbacks[msg.id];
+    delete _rpcCallbacks[msg.id];
+    if (msg.error) cb.reject(new Error(msg.error.message || JSON.stringify(msg.error)));
+    else cb.resolve(msg.result);
+    return;
+  }
   if (msg.method === 'ui/initialize') {
     window.parent.postMessage({ jsonrpc: '2.0', method: 'ui/notifications/initialized', params: {} }, '*');
     notifyHeight();
