@@ -1,4 +1,7 @@
 import os
+# Allow all hosts/origins for MCP streamable HTTP (must be set before any MCP imports)
+os.environ["MCP_ALLOWED_HOSTS"] = "*"
+os.environ["MCP_ALLOWED_ORIGINS"] = "*"
 import io
 import re
 import json
@@ -1338,10 +1341,6 @@ _mcp_app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"]
 
 app = _mcp_app
 
-
-# Allow all hosts for MCP streamable HTTP (Railway proxy + ChatGPT)
-os.environ.setdefault("MCP_ALLOWED_HOSTS", "*")
-os.environ.setdefault("MCP_ALLOWED_ORIGINS", "*")
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
