@@ -425,27 +425,29 @@ def _store_result(doc_id: str, file_bytes: bytes, text: str, pages: int, filenam
 
 from mcp.server.transport_security import TransportSecuritySettings
 
-mcp = FastMCP(
+# --- Claude MCP instance (SSE transport at /sse) ---
+mcp = FastMCP("BW Document OCR")
+
+
+# --- ChatGPT MCP instance (streamable HTTP at /mcp) ---
+_WIDGET_URI = "ui://widget/parser.html"
+import mcp.types as mcp_types
+
+mcp_chatgpt = FastMCP(
     "BW Document OCR",
     transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
 )
 
 
-# Register the widget as an MCP App resource for ChatGPT iframe rendering
-_WIDGET_URI = "ui://widget/parser.html"
-import mcp.types as mcp_types
-
-
-@mcp.resource(_WIDGET_URI, name="parser-widget", mime_type="text/html",
-              description="Document OCR upload widget — drag and drop PDFs to parse with Mistral OCR")
+@mcp_chatgpt.resource(_WIDGET_URI, name="parser-widget", mime_type="text/html",
+                       description="Document OCR upload widget — drag and drop PDFs to parse with Mistral OCR")
 def get_parser_widget():
     widget_path = os.path.join(os.path.dirname(__file__), "public", "parser-widget.html")
     with open(widget_path, "r", encoding="utf-8") as f:
         return f.read()
 
 
-# ChatGPT App widget tool — opens the upload widget iframe
-@mcp.tool(
+@mcp_chatgpt.tool(
     meta={
         "openai/outputTemplate": _WIDGET_URI,
         "openai/toolInvocation/invoking": "Opening document parser...",
@@ -1321,13 +1323,12 @@ from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 
 
-# --- Combined app: use FastMCP's streamable HTTP app as the base,
-# then add all our custom routes. This ensures /mcp works for ChatGPT
-# and all HTTP routes + /sse work for Claude and the web UI. ---
+# --- Combined app: ChatGPT streamable HTTP as base, Claude SSE + HTTP routes injected ---
 
-_mcp_app = mcp.streamable_http_app()
+# ChatGPT MCP app (streamable HTTP with /mcp endpoint)
+_chatgpt_app = mcp_chatgpt.streamable_http_app()
 
-# Inject our custom routes into the MCP app's route list (before the /mcp catch-all)
+# Inject Claude SSE + all HTTP routes before the /mcp route
 _custom_routes = [
     Route("/", homepage),
     Route("/favicon-32.png", favicon),
@@ -1345,12 +1346,12 @@ _custom_routes = [
     Route("/sse", endpoint=handle_sse),
     Mount("/messages/", app=sse.handle_post_message),
 ]
-_mcp_app.router.routes = _custom_routes + list(_mcp_app.router.routes)
+_chatgpt_app.router.routes = _custom_routes + list(_chatgpt_app.router.routes)
 
 # Add CORS middleware
-_mcp_app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+_chatgpt_app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-app = _mcp_app
+app = _chatgpt_app
 
 
 if __name__ == "__main__":
