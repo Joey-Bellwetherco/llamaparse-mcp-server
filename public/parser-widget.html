@@ -143,6 +143,14 @@ async function handleFile(file) {
   status.innerHTML = '<div class="parsing"><div class="spinner"></div>Parsing ' + file.name + '...</div>';
   notifyHeight();
 
+  const MAX_IFRAME_SIZE = 10 * 1024 * 1024; // 10 MB
+
+  if (file.size > MAX_IFRAME_SIZE) {
+    // Large file — can't reliably upload through ChatGPT iframe
+    showLargeFileMessage(file.name);
+    return;
+  }
+
   try {
     if (!(window.openai && window.openai.uploadFile)) {
       showError('OpenAI file API not available');
@@ -162,12 +170,10 @@ async function handleFile(file) {
     let fileUrl;
     try {
       const dlResult = await window.openai.getFileDownloadUrl({ fileId: uploadResult.fileId });
-      // Try all known field names
       fileUrl = dlResult.url || dlResult.download_url || dlResult.downloadUrl
         || (dlResult.data && (dlResult.data.url || dlResult.data.download_url))
         || (typeof dlResult === 'string' ? dlResult : null);
       if (!fileUrl) {
-        // Debug: show what we got back
         showError('DEBUG upload: ' + JSON.stringify(uploadResult).slice(0, 200) + ' | dlResult: ' + JSON.stringify(dlResult).slice(0, 200));
         return;
       }
@@ -270,6 +276,52 @@ function showSuccess(data, filename) {
     } catch (e) { copyFallback(dlUrl); showCopied(); }
     function showCopied() {
       document.getElementById('toast').innerHTML = '<div class="toast">Link copied to clipboard</div>';
+      setTimeout(() => { const t = document.getElementById('toast'); if (t) t.innerHTML = ''; }, 2500);
+    }
+  });
+
+  notifyHeight();
+}
+
+function showLargeFileMessage(filename) {
+  const parseUrl = SERVER_URL + '/parse?parser=mistral';
+  const curlCmd = 'curl -s -X POST "' + parseUrl + '" -F "file=@' + filename + '"';
+  status.innerHTML = `
+    <div class="result">
+      <div class="meta">
+        <strong>Large file detected</strong>
+        <div class="detail">This file is too large to upload through ChatGPT. Use the direct parser instead:</div>
+      </div>
+      <div style="margin-top:10px;">
+        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px;">Upload directly:</div>
+        <div style="background:var(--bg-drop);border:1px solid var(--border);border-radius:6px;padding:10px 12px;font-family:monospace;font-size:11px;word-break:break-all;color:var(--text);">${parseUrl}</div>
+      </div>
+      <div class="actions" style="margin-top:10px;">
+        <button class="btn btn-link" id="copyUrlBtn">
+          <svg viewBox="0 0 24 24"><path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/></svg>
+          Copy URL
+        </button>
+      </div>
+      <div id="toast"></div>
+    </div>`;
+
+  document.getElementById('copyUrlBtn').addEventListener('click', () => {
+    function copyFallback(text) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.cssText = 'position:fixed;left:-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(parseUrl).then(done).catch(() => { copyFallback(parseUrl); done(); });
+      } else { copyFallback(parseUrl); done(); }
+    } catch (e) { copyFallback(parseUrl); done(); }
+    function done() {
+      document.getElementById('toast').innerHTML = '<div class="toast">URL copied to clipboard</div>';
       setTimeout(() => { const t = document.getElementById('toast'); if (t) t.innerHTML = ''; }, 2500);
     }
   });
