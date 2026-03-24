@@ -6,7 +6,7 @@
 <title>BW Document Parser</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { height: 100%; overflow: auto; }
+  html, body { height: 100%; }
   body { font-family: 'Avenir LT Std', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
          background: #fff; color: #1C2B5A; display: flex; align-items: stretch;
          justify-content: center; padding: 16px; min-height: 100%; }
@@ -62,7 +62,14 @@ const dropZone = document.getElementById('dropZone');
 const fileInput = document.getElementById('fileInput');
 const status = document.getElementById('status');
 
-const inChatGPT = window.parent !== window && typeof window.openai !== 'undefined';
+// Tell ChatGPT how tall we need to be
+function notifyHeight() {
+  try {
+    if (window.openai && window.openai.notifyIntrinsicHeight) {
+      window.openai.notifyIntrinsicHeight(document.body.scrollHeight);
+    }
+  } catch (e) {}
+}
 
 dropZone.addEventListener('click', () => fileInput.click());
 dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
@@ -75,29 +82,22 @@ fileInput.addEventListener('change', () => { if (fileInput.files.length) handleF
 
 async function handleFile(file) {
   status.innerHTML = '<div class="parsing"><div class="spinner"></div> Parsing ' + file.name + '...</div>';
+  notifyHeight();
 
   try {
-    let downloadUrl;
-
-    // Always upload directly to our server — works from any context
     const form = new FormData();
     form.append('file', file);
-    const resp = await fetch(SERVER_URL + '/parse?parser=mistral', { method: 'POST', body: form });
+    const resp = await fetch(SERVER_URL + '/parse?parser=mistral', {
+      method: 'POST',
+      body: form,
+    });
+    if (!resp.ok) {
+      showError('Server returned ' + resp.status);
+      return;
+    }
     const data = await resp.json();
     if (data.error) { showError(data.error); return; }
     showSuccess(data, file.name);
-
-    if (inChatGPT) {
-      window.parent.postMessage({
-        jsonrpc: '2.0',
-        method: 'ui/notifications/tool-result',
-        params: {
-          structuredContent: data,
-          content: 'Parsed ' + file.name + ': ' + data.pages + ' pages, ' + data.chars + ' chars',
-        }
-      }, '*');
-    }
-
   } catch (e) {
     showError(e.message);
   }
@@ -114,26 +114,32 @@ function showSuccess(data, filename) {
         Download ${baseName}.md
       </a>
     </div>`;
+  notifyHeight();
 }
 
 function showError(msg) {
   status.innerHTML = '<p class="error">' + msg + '</p>';
+  notifyHeight();
 }
 
-if (inChatGPT) {
-  window.addEventListener('message', (event) => {
-    if (event.source !== window.parent) return;
-    const msg = event.data;
-    if (msg.jsonrpc !== '2.0') return;
-    if (msg.method === 'ui/initialize') {
-      window.parent.postMessage({
-        jsonrpc: '2.0',
-        method: 'ui/notifications/initialized',
-        params: {}
-      }, '*');
-    }
-  });
-}
+// ChatGPT bridge + height notification on load
+window.addEventListener('load', () => {
+  notifyHeight();
+});
+
+window.addEventListener('message', (event) => {
+  if (event.source !== window.parent) return;
+  const msg = event.data;
+  if (!msg || msg.jsonrpc !== '2.0') return;
+  if (msg.method === 'ui/initialize') {
+    window.parent.postMessage({
+      jsonrpc: '2.0',
+      method: 'ui/notifications/initialized',
+      params: {}
+    }, '*');
+    notifyHeight();
+  }
+});
 </script>
 </body>
 </html>
