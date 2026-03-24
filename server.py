@@ -1295,7 +1295,6 @@ app = Starlette(
         Route("/widget/parser", widget_endpoint),
         Route("/sse", endpoint=handle_sse),
         Mount("/messages/", app=sse.handle_post_message),
-        Mount("/mcp", app=mcp.streamable_http_app()),
     ],
     middleware=[
         Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]),
