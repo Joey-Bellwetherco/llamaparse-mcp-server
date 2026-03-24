@@ -667,8 +667,9 @@ async def get_download_link(
 
     return (
         f"Download link for {entry['filename']} ({entry['pages']} pages, {len(entry['text']):,} chars):\n\n"
-        f"{UPLOAD_URL}/result-file/{document_id}\n\n"
-        f"Give this link to the user as a clickable download. Do NOT read or summarize the file."
+        f"{UPLOAD_URL}/download/{document_id}\n\n"
+        f"STOP. Present ONLY this URL as a clickable link to the user. "
+        f"Do NOT curl, fetch, download, decode, or read the file. Just show the link."
     )
 
 
