@@ -79,37 +79,13 @@ async function handleFile(file) {
   try {
     let downloadUrl;
 
-    if (inChatGPT && window.openai && window.openai.uploadFile) {
-      // ChatGPT App mode: upload via OpenAI, get download URL, send to our parser
-      try {
-        const uploadResult = await window.openai.uploadFile(file);
-        const dlResult = await window.openai.getFileDownloadUrl({ fileId: uploadResult.fileId });
-        downloadUrl = dlResult.url || dlResult.download_url || dlResult;
-      } catch (oaiErr) {
-        // Fallback to direct upload if OpenAI API fails
-        showError('ChatGPT file API error: ' + oaiErr.message + '. Trying direct upload...');
-      }
-    }
-
-    if (downloadUrl) {
-      // Parse via URL
-      const resp = await fetch(SERVER_URL + '/parse-url', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: downloadUrl, parser: 'mistral' }),
-      });
-      const data = await resp.json();
-      if (data.error) { showError(data.error); return; }
-      showSuccess(data, file.name);
-    } else {
-      // Direct upload to our server
-      const form = new FormData();
-      form.append('file', file);
-      const resp = await fetch(SERVER_URL + '/parse?parser=mistral', { method: 'POST', body: form });
-      const data = await resp.json();
-      if (data.error) { showError(data.error); return; }
-      showSuccess(data, file.name);
-    }
+    // Always upload directly to our server — works from any context
+    const form = new FormData();
+    form.append('file', file);
+    const resp = await fetch(SERVER_URL + '/parse?parser=mistral', { method: 'POST', body: form });
+    const data = await resp.json();
+    if (data.error) { showError(data.error); return; }
+    showSuccess(data, file.name);
 
     if (inChatGPT) {
       window.parent.postMessage({
