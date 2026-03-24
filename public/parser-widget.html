@@ -163,18 +163,25 @@ function showSuccess(data, filename) {
       <div id="toast"></div>
     </div>`;
 
-  // Send to chat — always send download link, never the full text
-  document.getElementById('sendBtn').addEventListener('click', () => {
+  // Send to chat — fetch text and tell ChatGPT to save it as a file
+  document.getElementById('sendBtn').addEventListener('click', async () => {
     const btn = document.getElementById('sendBtn');
-    window.parent.postMessage({
-      jsonrpc: '2.0', method: 'ui/message',
-      id: Math.random().toString(36).slice(2),
-      params: { role: 'user', content: [
-        { type: 'text', text: 'Parsed: ' + (data.filename || filename) + ' (' + data.pages + ' pages, ' + Number(data.chars || 0).toLocaleString() + ' chars)\n\nDownload the markdown file: ' + dlUrl }
-      ]}
-    }, '*');
-    btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"/></svg> Sent';
-    btn.classList.add('done');
+    btn.innerHTML = '<div class="spinner"></div> Sending...';
+    try {
+      const r = await fetch(SERVER_URL + '/result/' + data.document_id);
+      const text = await r.text();
+      // Send in chunks if needed, with explicit file creation instruction
+      const mdFilename = baseName + '.md';
+      window.parent.postMessage({
+        jsonrpc: '2.0', method: 'ui/message',
+        id: Math.random().toString(36).slice(2),
+        params: { role: 'user', content: [
+          { type: 'text', text: 'INSTRUCTION: Write the following text EXACTLY as-is to a file called "' + mdFilename + '" and provide a download link. Do NOT summarize, modify, truncate, or comment on the content. Just write it to the file.\n\n---BEGIN FILE CONTENT---\n' + text + '\n---END FILE CONTENT---' }
+        ]}
+      }, '*');
+      btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"/></svg> Sent';
+      btn.classList.add('done');
+    } catch (e) { btn.textContent = 'Failed'; }
   });
 
   // Copy download link — with fallback for sandboxed iframes
