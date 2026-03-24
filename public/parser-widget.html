@@ -215,6 +215,7 @@ async function handleFile(file) {
 function showSuccess(data, filename) {
   const baseName = filename.replace(/\.[^.]+$/, '');
   const dlUrl = SERVER_URL + '/download/' + data.document_id;
+  const isLarge = data.chars > 50000;
   status.innerHTML = `
     <div class="result">
       <div class="meta">
@@ -222,15 +223,16 @@ function showSuccess(data, filename) {
         <div class="detail">${data.pages} page${data.pages !== 1 ? 's' : ''} &middot; ${Number(data.chars).toLocaleString()} characters</div>
       </div>
       <div class="actions">
-        <button class="btn btn-send" id="sendBtn">
+        ${isLarge ? '' : `<button class="btn btn-send" id="sendBtn">
           <svg viewBox="0 0 24 24"><path d="M3.4 20.4l17.45-7.48a1 1 0 000-1.84L3.4 3.6a.993.993 0 00-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87 1l.01 4.61c0 .71.73 1.2 1.39.91z"/></svg>
           Send to chat
-        </button>
+        </button>`}
         <button class="btn btn-link" id="linkBtn">
           <svg viewBox="0 0 24 24"><path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/></svg>
           Copy link
         </button>
       </div>
+      ${isLarge ? '<div style="font-size:11px;color:var(--text-muted);margin-top:6px;">Large document — use the link to download the parsed result</div>' : ''}
       <div id="toast"></div>
     </div>`;
 
