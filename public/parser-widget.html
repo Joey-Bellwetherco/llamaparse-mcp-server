@@ -133,7 +133,7 @@ function showSuccess(data, filename) {
         params: {
           role: 'user',
           content: [
-            { type: 'text', text: 'Here is the parsed document (' + (data.filename || filename) + ', ' + data.pages + ' pages):\n\n' + text }
+            { type: 'text', text: 'Create a downloadable markdown file called "' + baseName + '.md" with this exact content. Do NOT summarize or modify it. Just create the file for download:\n\n' + text }
           ],
         }
       }, '*');
