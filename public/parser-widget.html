@@ -113,15 +113,37 @@ function showSuccess(data, filename) {
       <div class="meta"><strong>${data.filename || filename}</strong><br>${data.pages} page${data.pages !== 1 ? 's' : ''} &middot; ${Number(data.chars).toLocaleString()} characters extracted</div>
       <div class="actions">
         <button class="btn btn-primary" id="dlBtn">
-          <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
-          Download .md
+          <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+          Send to chat
         </button>
         <button class="btn btn-secondary" id="newBtn">Parse another</button>
       </div>
     </div>`;
-  const downloadUrl = SERVER_URL + '/download/' + data.document_id;
-  document.getElementById('dlBtn').addEventListener('click', () => {
-    window.location.href = downloadUrl;
+  document.getElementById('dlBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('dlBtn');
+    btn.textContent = 'Sending to chat...';
+    try {
+      // Fetch the parsed text and send it back to ChatGPT as a tool result
+      const r = await fetch(SERVER_URL + '/result/' + data.document_id);
+      const text = await r.text();
+      window.parent.postMessage({
+        jsonrpc: '2.0',
+        method: 'ui/notifications/tool-result',
+        params: {
+          structuredContent: {
+            document_id: data.document_id,
+            filename: data.filename || filename,
+            pages: data.pages,
+            chars: data.chars,
+            text: text,
+          },
+          content: text,
+        }
+      }, '*');
+      btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"/></svg> Sent to chat';
+    } catch (e) {
+      btn.textContent = 'Failed: ' + e.message;
+    }
   });
   document.getElementById('newBtn').addEventListener('click', () => {
     status.innerHTML = '';
